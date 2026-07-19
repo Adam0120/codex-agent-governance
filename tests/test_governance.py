@@ -7,11 +7,15 @@ import tempfile
 import time
 import tomllib
 import unittest
+from importlib import util
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "scripts" / "agent_system.py"
 INSTALL = ROOT / "scripts" / "install.py"
+
+def canonical_root(path):
+    return path.parent.resolve(strict=False) / path.name
 
 def run(path, *args, env=None, ok=True):
     result = subprocess.run([sys.executable, str(path), *args], text=True, capture_output=True, env=env)
@@ -19,8 +23,8 @@ def run(path, *args, env=None, ok=True):
     return result
 
 def isolated(temp):
-    home = Path(temp) / "home"; codex = Path(temp) / "codex"
-    return home, codex, {**os.environ, "HOME":str(home), "CODEX_HOME":str(codex)}
+    raw_home = Path(temp) / "home"; raw_codex = Path(temp) / "codex"
+    return canonical_root(raw_home), canonical_root(raw_codex), {**os.environ, "HOME":str(raw_home), "CODEX_HOME":str(raw_codex)}
 
 def state_bytes(home, codex):
     roots = [home / ".agents" / "skills" / "govern-agent-system", codex]
@@ -205,13 +209,23 @@ class GovernanceTests(unittest.TestCase):
             stdout, stderr = process.communicate(timeout=10)
             self.assertNotEqual(process.returncode, 0); self.assertIn("RECOVERY_REQUIRED", stderr); self.assertEqual(state_bytes(home, codex), before)
     def test_trusted_root_alias_acceptance_and_managed_link_rejection(self):
+        spec = util.spec_from_file_location("governance_core_home_test", CORE)
+        module = util.module_from_spec(spec); sys.path.insert(0, str(CORE.parent))
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.path.pop(0)
+        requested = Path("configured-home"); fallback = Path("platform-home")
+        self.assertEqual(module.configured_home({"HOME":str(requested), "USERPROFILE":str(fallback)}, fallback), requested)
+        self.assertEqual(module.configured_home({"USERPROFILE":str(requested)}, fallback), fallback)
         with tempfile.TemporaryDirectory() as temp:
             actual = Path(temp) / "actual"; actual.mkdir(); alias = Path(temp) / "alias"
             try:
                 alias.symlink_to(actual, target_is_directory=True)
             except OSError as exc:
                 self.skipTest(f"symlinks unavailable: {exc}")
-            home = actual / "home"; home.mkdir(); env = {**os.environ, "HOME":str(alias / "home"), "CODEX_HOME":str(alias / "codex")}
+            raw_home = actual / "home"; raw_home.mkdir(); home = canonical_root(raw_home)
+            env = {**os.environ, "HOME":str(alias / "home"), "CODEX_HOME":str(alias / "codex")}
             result = json.loads(run(INSTALL, "install", env=env).stdout)
             self.assertEqual(Path(result["installed"]), home / ".agents/skills/govern-agent-system")
         with tempfile.TemporaryDirectory() as temp:
@@ -263,8 +277,9 @@ class GovernanceTests(unittest.TestCase):
             home = Path(temp) / "home with spaces"; codex = Path(temp) / "codex with spaces"
             env = {**os.environ, "HOME":str(home), "CODEX_HOME":str(codex)}
             result = json.loads(run(renamed / "scripts/install.py", "install", env=env).stdout)
-            self.assertEqual(Path(result["installed"]), home / ".agents/skills/govern-agent-system")
-            assignment = json.loads(run(home / ".agents/skills/govern-agent-system/scripts/agent_system.py", "dispatch", "--cwd", str(renamed), "--request", json.dumps({"parent_model":"gpt-5.6-sol","parent_reasoning_effort":"high","task_type":"implementation","known_target":True,"factual_uncertainty":[]}), env=env).stdout)["assignment"]
+            installed = canonical_root(home) / ".agents/skills/govern-agent-system"
+            self.assertEqual(Path(result["installed"]), installed)
+            assignment = json.loads(run(installed / "scripts/agent_system.py", "dispatch", "--cwd", str(renamed), "--request", json.dumps({"parent_model":"gpt-5.6-sol","parent_reasoning_effort":"high","task_type":"implementation","known_target":True,"factual_uncertainty":[]}), env=env).stdout)["assignment"]
             self.assertIn('python3 "$HOME/.agents/skills/govern-agent-system/scripts/agent_system.py"', assignment)
     def test_chart_determinism_and_public_scan(self):
         run(ROOT / "scripts" / "render_charts.py")

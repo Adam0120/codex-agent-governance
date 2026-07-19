@@ -15,6 +15,7 @@ import sys
 import tempfile
 import tomllib
 import unicodedata
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -52,8 +53,14 @@ def trusted_root(raw: Path) -> Path:
     return root
 
 
+def configured_home(environ: Mapping[str, str] | None = None, fallback: Path | None = None) -> Path:
+    source = os.environ if environ is None else environ
+    raw = source.get("HOME")
+    return Path(raw) if raw else (Path.home() if fallback is None else Path(fallback))
+
+
 def user_paths() -> dict[str, Path]:
-    home = trusted_root(Path.home())
+    home = trusted_root(configured_home())
     codex = trusted_root(Path(os.environ.get("CODEX_HOME", str(home / ".codex"))))
     return {"codex": codex, "agents": codex / "agents", "config": codex / "config.toml", "skills": home / ".agents" / "skills", "ledger": codex / "agent-system" / "ledger.jsonl", "journal": codex / "agent-system" / "rollback-journal.json", "lock": codex / "agent-system" / "install.lock"}
 

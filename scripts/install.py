@@ -50,7 +50,7 @@ def trusted_root(raw: Path) -> Path:
 
 
 def paths() -> dict[str, Path]:
-    home = trusted_root(Path.home())
+    home = trusted_root(core.configured_home())
     codex = trusted_root(Path(os.environ.get("CODEX_HOME", str(home / ".codex"))))
     state = codex / "agent-system"
     skills = home / ".agents" / "skills"
