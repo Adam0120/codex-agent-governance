@@ -89,6 +89,33 @@ def is_link_or_reparse(info: os.stat_result) -> bool:
     return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & reparse_flag)
 
 
+def lexical_path(path: Path) -> Path:
+    return Path(os.path.abspath(str(path)))
+
+
+def lexical_path_key(path: Path) -> str:
+    return os.path.normcase(os.path.normpath(str(lexical_path(path))))
+
+
+def existing_lexical_symlink_target(path: Path) -> Path:
+    if not path.is_symlink():
+        raise InstallError(f"managed Skill reparse point is not a symlink: {path}")
+    try:
+        raw = os.readlink(path)
+        if raw.startswith("\\\\?\\UNC\\"):
+            raw = "\\\\" + raw[8:]
+        elif raw.startswith("\\\\?\\"):
+            raw = raw[4:]
+        target = Path(raw)
+        if not target.is_absolute():
+            target = path.parent / target
+        target = lexical_path(target)
+        target.resolve(strict=True)
+        return target
+    except (OSError, RuntimeError) as exc:
+        raise InstallError(f"unsafe or broken link at {path}: {exc}") from exc
+
+
 def managed_root(p: dict[str, Path], path: Path) -> Path:
     path = canonical(path)
     if path == p["codex"] or lexically_contained(path, p["codex"]):
@@ -110,12 +137,13 @@ def validate_chain(path: Path, root: Path, *, allow_final_symlink_to: Path | Non
             continue
         if component == path and skip_final:
             continue
-        if component == path and allow_final_symlink_to is not None and component.is_symlink():
+        if component == path and allow_final_symlink_to is not None:
             try:
-                target = canonical(component.parent / os.readlink(component))
-            except OSError as exc:
-                raise InstallError(f"unsafe link at {component}: {exc}") from exc
-            if target == canonical(allow_final_symlink_to):
+                expected = lexical_path(Path(allow_final_symlink_to))
+                expected.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise InstallError(f"unsafe recorded link target at {component}: {exc}") from exc
+            if lexical_path_key(existing_lexical_symlink_target(component)) == lexical_path_key(expected):
                 continue
         raise InstallError(f"symlink or reparse point is not allowed: {component}")
 
@@ -199,7 +227,7 @@ def expected_destinations(p: dict[str, Path]) -> dict[str, str]:
     }
 
 
-def validate_manifest_document(document: Any, p: dict[str, Path], *, verify_content: bool) -> dict[str, Any]:
+def validate_manifest_document(document: Any, p: dict[str, Path], *, verify_content: bool, allow_managed_skill_link: bool = False) -> dict[str, Any]:
     manifest = exact_keys(
         document,
         {"schema_version", "identity", "installer_version", "destinations", "link", "skill", "adapters", "config"},
@@ -233,9 +261,11 @@ def validate_manifest_document(document: Any, p: dict[str, Path], *, verify_cont
     if not verify_content:
         return manifest
     if manifest["link"]:
+        if not allow_managed_skill_link:
+            raise InstallError("managed Skill link is not authorized for this operation")
         recorded_target = Path(skill["target"])
         validate_chain(p["skill"], p["home"], allow_final_symlink_to=recorded_target)
-        if not p["skill"].is_symlink() or canonical(p["skill"].parent / os.readlink(p["skill"])) != recorded_target:
+        if lexical_path_key(existing_lexical_symlink_target(p["skill"])) != lexical_path_key(recorded_target):
             raise InstallError("managed Skill link mismatch")
         actual_skill_hash = tree_hash(recorded_target, source_tree=True)
     else:
@@ -256,7 +286,7 @@ def validate_manifest_document(document: Any, p: dict[str, Path], *, verify_cont
     return manifest
 
 
-def load_managed_manifest(p: dict[str, Path], *, verify_content: bool = True) -> dict[str, Any] | None:
+def load_managed_manifest(p: dict[str, Path], *, verify_content: bool = True, allow_managed_skill_link: bool = False) -> dict[str, Any] | None:
     info = lstat_or_none(p["manifest"])
     if info is None:
         return None
@@ -266,7 +296,7 @@ def load_managed_manifest(p: dict[str, Path], *, verify_content: bool = True) ->
         document = json.loads(p["manifest"].read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise InstallError(f"malformed managed manifest: {exc}") from exc
-    return validate_manifest_document(document, p, verify_content=verify_content)
+    return validate_manifest_document(document, p, verify_content=verify_content, allow_managed_skill_link=allow_managed_skill_link)
 
 
 def build_generation_plan(p: dict[str, Path]) -> tuple[dict[str, Any], list[tuple[Path, str]]]:
@@ -281,9 +311,9 @@ def build_generation_plan(p: dict[str, Path]) -> tuple[dict[str, Any], list[tupl
     return metadata, [(canonical(path), content) for path, content in writes]
 
 
-def inspect(p: dict[str, Path], writes: list[tuple[Path, str]]) -> dict[str, Any]:
+def inspect(p: dict[str, Path], writes: list[tuple[Path, str]], *, allow_managed_skill_link: bool = False) -> dict[str, Any]:
     validate_destinations(p, skip_skill_final=True)
-    manifest = load_managed_manifest(p)
+    manifest = load_managed_manifest(p, allow_managed_skill_link=allow_managed_skill_link)
     managed = manifest is not None
     skill_info = lstat_or_none(p["skill"])
     conflicts: list[str] = []
@@ -732,7 +762,7 @@ def install(link: bool) -> dict[str, Any]:
         _, writes = build_generation_plan(p)
         if writes != preliminary:
             raise InstallError("configuration changed while acquiring install lock")
-        status = inspect(p, writes)
+        status = inspect(p, writes, allow_managed_skill_link=link)
         if not status["ok"]:
             raise InstallError("refusing unmanaged collision or unsafe destination")
         staged, _ = build_install_staging(p, writes, link)
@@ -804,7 +834,7 @@ def check() -> dict[str, Any]:
     p = paths()
     try:
         _, writes = build_generation_plan(p)
-        return inspect(p, writes)
+        return inspect(p, writes, allow_managed_skill_link=True)
     except InstallError as exc:
         return {"ok": False, "error": str(exc), "skill": str(p["skill"]), "managed": False, "agent_conflicts": [], "mcp_touched": False}
 

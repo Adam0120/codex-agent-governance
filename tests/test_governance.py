@@ -9,6 +9,7 @@ import tomllib
 import unittest
 from importlib import util
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "scripts" / "agent_system.py"
@@ -218,6 +219,33 @@ class GovernanceTests(unittest.TestCase):
         requested = Path("configured-home"); fallback = Path("platform-home")
         self.assertEqual(module.configured_home({"HOME":str(requested), "USERPROFILE":str(fallback)}, fallback), requested)
         self.assertEqual(module.configured_home({"USERPROFILE":str(requested)}, fallback), fallback)
+        install_spec = util.spec_from_file_location("governance_installer_link_test", INSTALL)
+        installer = util.module_from_spec(install_spec); sys.path.insert(0, str(INSTALL.parent))
+        try:
+            install_spec.loader.exec_module(installer)
+        finally:
+            sys.path.pop(0)
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "home"; skill = home / ".agents/skills/govern-agent-system"
+            source = Path(temp) / "source"; source.mkdir(); skill.parent.mkdir(parents=True); skill.symlink_to(source, target_is_directory=True)
+            extended_target = "\\\\?\\" + str(source.resolve())
+            with mock.patch.object(installer.os, "readlink", return_value=extended_target):
+                installer.validate_chain(skill, home, allow_final_symlink_to=source.resolve())
+            skill.unlink(); alternate = Path(temp) / "alternate"; alternate.symlink_to(source, target_is_directory=True)
+            skill.symlink_to(alternate, target_is_directory=True)
+            with self.assertRaises(installer.InstallError):
+                installer.validate_chain(skill, home, allow_final_symlink_to=source)
+            skill.unlink(); alternate.unlink()
+            missing = Path(temp) / "missing"; skill.symlink_to(missing, target_is_directory=True)
+            with self.assertRaises(installer.InstallError):
+                installer.validate_chain(skill, home, allow_final_symlink_to=missing)
+            skill.unlink()
+            fake_reparse = object()
+            with mock.patch.object(installer, "lstat_or_none", side_effect=lambda path: fake_reparse if path == skill else None), \
+                 mock.patch.object(installer, "is_link_or_reparse", side_effect=lambda info: info is fake_reparse), \
+                 mock.patch.object(installer.Path, "is_symlink", return_value=False):
+                with self.assertRaises(installer.InstallError):
+                    installer.validate_chain(skill, home, allow_final_symlink_to=source)
         with tempfile.TemporaryDirectory() as temp:
             actual = Path(temp) / "actual"; actual.mkdir(); alias = Path(temp) / "alias"
             try:
@@ -251,6 +279,12 @@ class GovernanceTests(unittest.TestCase):
                     self.assertEqual(manifest["installer_version"], "0.1.1")
                     if link:
                         self.assertTrue(target.is_symlink()); self.assertEqual(target.resolve(), release_b.resolve())
+                        self.assertNotEqual(run(release_b / "scripts/install.py", "install", env=env, ok=False).returncode, 0)
+                        self.assertTrue(target.is_symlink()); self.assertEqual(target.resolve(), release_b.resolve())
+                        target.unlink(); target.symlink_to(release_a, target_is_directory=True)
+                        self.assertNotEqual(run(release_b / "scripts/install.py", "install", "--link", env=env, ok=False).returncode, 0)
+                        target.unlink(); target.symlink_to(Path(temp) / "missing-release", target_is_directory=True)
+                        self.assertNotEqual(run(release_b / "scripts/install.py", "install", "--link", env=env, ok=False).returncode, 0)
                     else:
                         self.assertFalse(target.is_symlink()); self.assertEqual((target / "release-marker.txt").read_text(), "B")
     def test_config_order_audit_and_canonical_skill_identity(self):
