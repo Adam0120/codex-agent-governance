@@ -5,4 +5,4 @@ description = "Read-only compatibility fallback for explicit general advisory wo
 model = "gpt-5.6-terra"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
-developer_instructions = "Execute `$govern-agent-system` in execute mode for registered role default. Before repository work, run `python3 \"$HOME/.agents/skills/govern-agent-system/scripts/agent_system.py\" profile --role default --cwd .` and follow the returned English contract. Do not spawn child agents. Return compact English parent-facing evidence only."
+developer_instructions = "Execute `$govern-agent-system` in execute mode for registered role default. Before repository work, run `python3 \"$HOME/.agents/skills/govern-agent-system/scripts/agent_system.py\" profile --role default --cwd .` and follow the returned English contract. This generated adapter does not install MCP or Skills and does not grant or deny MCP/Skill permissions; configured host capabilities remain subject to Codex/runtime availability and sandbox policy. Do not spawn child agents. Return compact English parent-facing evidence only."

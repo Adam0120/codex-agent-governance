@@ -23,7 +23,7 @@ import managed_lock
 
 SOURCE = Path(os.path.abspath(__file__)).parents[1]
 IDENTITY = "govern-agent-system"
-INSTALL_VERSION = "0.1.0"
+INSTALL_VERSION = "0.1.1"
 MANIFEST_SCHEMA = 1
 SNAPSHOT_SCHEMA = 2
 ROLE_NAMES = tuple(sorted(core.catalog()[0]))
@@ -234,7 +234,7 @@ def expected_destinations(p: dict[str, Path]) -> dict[str, str]:
     }
 
 
-def validate_manifest_document(document: Any, p: dict[str, Path], *, verify_content: bool, allow_managed_skill_link: bool = False) -> dict[str, Any]:
+def validate_manifest_document(document: Any, p: dict[str, Path], *, verify_content: bool) -> dict[str, Any]:
     manifest = exact_keys(
         document,
         {"schema_version", "identity", "installer_version", "destinations", "link", "skill", "adapters", "config"},
@@ -268,8 +268,6 @@ def validate_manifest_document(document: Any, p: dict[str, Path], *, verify_cont
     if not verify_content:
         return manifest
     if manifest["link"]:
-        if not allow_managed_skill_link:
-            raise InstallError("managed Skill link is not authorized for this operation")
         recorded_target = Path(skill["target"])
         validate_chain(p["skill"], p["home"], allow_final_symlink_to=recorded_target)
         if lexical_path_key(existing_lexical_symlink_target(p["skill"])) != lexical_path_key(recorded_target):
@@ -293,7 +291,7 @@ def validate_manifest_document(document: Any, p: dict[str, Path], *, verify_cont
     return manifest
 
 
-def load_managed_manifest(p: dict[str, Path], *, verify_content: bool = True, allow_managed_skill_link: bool = False) -> dict[str, Any] | None:
+def load_managed_manifest(p: dict[str, Path], *, verify_content: bool = True) -> dict[str, Any] | None:
     info = lstat_or_none(p["manifest"])
     if info is None:
         return None
@@ -303,7 +301,7 @@ def load_managed_manifest(p: dict[str, Path], *, verify_content: bool = True, al
         document = json.loads(p["manifest"].read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise InstallError(f"malformed managed manifest: {exc}") from exc
-    return validate_manifest_document(document, p, verify_content=verify_content, allow_managed_skill_link=allow_managed_skill_link)
+    return validate_manifest_document(document, p, verify_content=verify_content)
 
 
 def build_generation_plan(p: dict[str, Path]) -> tuple[dict[str, Any], list[tuple[Path, str]]]:
@@ -318,9 +316,9 @@ def build_generation_plan(p: dict[str, Path]) -> tuple[dict[str, Any], list[tupl
     return metadata, [(canonical(path), content) for path, content in writes]
 
 
-def inspect(p: dict[str, Path], writes: list[tuple[Path, str]], *, allow_managed_skill_link: bool = False) -> dict[str, Any]:
+def inspect(p: dict[str, Path], writes: list[tuple[Path, str]]) -> dict[str, Any]:
     validate_destinations(p, skip_skill_final=True)
-    manifest = load_managed_manifest(p, allow_managed_skill_link=allow_managed_skill_link)
+    manifest = load_managed_manifest(p)
     managed = manifest is not None
     skill_info = lstat_or_none(p["skill"])
     conflicts: list[str] = []
@@ -769,7 +767,7 @@ def install(link: bool) -> dict[str, Any]:
         _, writes = build_generation_plan(p)
         if writes != preliminary:
             raise InstallError("configuration changed while acquiring install lock")
-        status = inspect(p, writes, allow_managed_skill_link=link)
+        status = inspect(p, writes)
         if not status["ok"]:
             raise InstallError("refusing unmanaged collision or unsafe destination")
         staged, _ = build_install_staging(p, writes, link)
@@ -841,9 +839,9 @@ def check() -> dict[str, Any]:
     p = paths()
     try:
         _, writes = build_generation_plan(p)
-        return inspect(p, writes, allow_managed_skill_link=True)
+        return {**inspect(p, writes), "release_version": INSTALL_VERSION}
     except InstallError as exc:
-        return {"ok": False, "error": str(exc), "skill": str(p["skill"]), "managed": False, "agent_conflicts": [], "mcp_touched": False}
+        return {"ok": False, "error": str(exc), "skill": str(p["skill"]), "managed": False, "agent_conflicts": [], "mcp_touched": False, "release_version": INSTALL_VERSION}
 
 
 def fail(message: str) -> None:
@@ -853,6 +851,7 @@ def fail(message: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=INSTALL_VERSION)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check")
     item = sub.add_parser("install")

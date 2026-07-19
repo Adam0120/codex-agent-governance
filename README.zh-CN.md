@@ -4,7 +4,7 @@
 
 一个可移植、默认拒绝的 Codex 代理协作控制平面。
 
-**[English](README.md)** · **非官方实验性项目**：独立社区项目，并非 OpenAI 产品或官方政策。即使发布视觉图片无法加载，文档和命令仍然可用。
+**[English](README.md)** · **[English changelog](CHANGELOG.md)** · **[中文变更日志](CHANGELOG.zh-CN.md)** · **非官方实验性项目**：独立社区项目，并非 OpenAI 产品或官方政策。即使发布视觉图片无法加载，文档和命令仍然可用。
 
 它通过八角色目录、确定性分派、英文子代理契约、生成式适配器、隐私受限账本和可恢复安装来约束协作；核心不要求 MCP 或 CodeGraph。
 
@@ -75,14 +75,14 @@ stateDiagram-v2
 | `semantic_reviewer` | 最终语义/安全审查 | Sol / high / read-only |
 | `release_operator` | 已批准 revision 激活 | Sol / high / workspace-write |
 
-子代理必须使用英文并给出紧凑最终证据，且禁止再派生子代理；生成适配器只管理 `enabled = true`、`max_threads = 4` 与 `max_depth = 1`，保留其他 `[agents]` 键。记录 schema 会拒绝 source、prompt、path、log、credential 等敏感字段。
+子代理必须使用英文并给出紧凑最终证据，且禁止再派生子代理；生成适配器只管理 `enabled = true`、`max_threads = 4` 与 `max_depth = 1`，保留其他 `[agents]` 键。生成适配器是声明式兼容镜像：不安装 MCP/Skill，也不显式授予或拒绝 MCP/Skill 权限；宿主已配置的能力仍受 Codex/运行时可用性和当前沙箱约束。Spark 定位器不依赖必需的 CodeGraph、MCP 或 Skill。记录 schema 会拒绝 source、prompt、path、log、credential 等敏感字段。
 
 ## 观察代理，不是 token 计费
 
 <p align="center"><img src="docs/assets/instruction-bytes.svg" alt="观察代理：指令字节 20,462 到 7,055；不是 token 计费" width="760"></p>
 <p align="center"><img src="docs/assets/observed-starts.svg" alt="按类别的观察代理启动数据；不是 token 计费" width="760"></p>
 
-匿名 [观察数据](benchmarks/observations.json)：指令字节代理 20,462 → 7,055；历史现场观察评估 36/36（不是当前公开 harness）；当前公开 unittest 为 14/14；全新进程 4/4；适配器 8/8；六个账本事件、零敏感字段。生成的 `mechanical_luna` 受限变体要求运行时模型可用；本机隔离 CLI 探测在 API 认证阶段停止，未完成 Luna 实机验证或成功 smoke。定位器契约修正在盲测首响应之前完成。这些是观察/代理，不是受控 benchmark，也不是 token 计费。
+匿名 [观察数据](benchmarks/observations.json)：指令字节代理 20,462 → 7,055；历史现场观察评估 36/36（不是当前公开 harness）；当前公开 unittest 为 16/16；全新进程 4/4；适配器 8/8；六个账本事件、零敏感字段。生成的 `mechanical_luna` 受限变体要求运行时模型可用；本机隔离 CLI 探测在 API 认证阶段停止，未完成 Luna 实机验证或成功 smoke。定位器契约修正在盲测首响应之前完成。这些是观察/代理，不是受控 benchmark，也不是 token 计费。
 
 ## 测试与贡献
 

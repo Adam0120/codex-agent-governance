@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -47,8 +48,12 @@ def state_bytes(home, codex):
 
 def release_copy(target, version, marker):
     shutil.copytree(ROOT, target, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "build", "dist"))
+    project = target / "pyproject.toml"
+    project.write_text(re.sub(r'version = "[0-9]+\.[0-9]+\.[0-9]+"', f'version = "{version}"', project.read_text()))
     installer = target / "scripts/install.py"
-    installer.write_text(installer.read_text().replace('INSTALL_VERSION = "0.1.0"', f'INSTALL_VERSION = "{version}"'))
+    installer.write_text(re.sub(r'INSTALL_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"', f'INSTALL_VERSION = "{version}"', installer.read_text()))
+    core = target / "scripts/agent_system.py"
+    core.write_text(re.sub(r'RELEASE_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"', f'RELEASE_VERSION = "{version}"', core.read_text()))
     (target / "release-marker.txt").write_text(marker)
 
 class GovernanceTests(unittest.TestCase):
@@ -79,6 +84,14 @@ class GovernanceTests(unittest.TestCase):
             self.assertEqual(json.loads(run(CORE, "dispatch", "--request", request).stdout)["role"], "code_locator")
         text = (ROOT / ".codex/agents/worker.toml").read_text()
         self.assertNotIn("<installed-skill>", text); self.assertNotIn("<current cwd>", text); self.assertIn("$govern-agent-system", text); self.assertIn('"$HOME/.agents/skills/govern-agent-system', text)
+        with tempfile.TemporaryDirectory() as temp:
+            home, codex, env = isolated(temp)
+            run(CORE, "generate", "--cwd", str(ROOT), env=env)
+            for adapter in (codex / "agents").glob("*.toml"):
+                generated = adapter.read_text(encoding="utf-8").lower()
+                self.assertNotIn("codegraph", generated); self.assertIn("$govern-agent-system", generated)
+                self.assertIn(f"profile --role {adapter.stem} --cwd .", generated)
+                self.assertIn("does not install mcp or skills and does not grant or deny mcp/skill permissions", generated)
     def test_installer_collision_update_and_rollback(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / "home"; codex = Path(temp) / "codex"; target = home / ".agents" / "skills" / "govern-agent-system"; target.mkdir(parents=True); (target / "foreign").write_text("x")
@@ -298,7 +311,9 @@ class GovernanceTests(unittest.TestCase):
                     self.assertEqual(manifest["installer_version"], "0.1.1")
                     if link:
                         self.assertTrue(target.is_symlink()); self.assertEqual(target.resolve(), release_b.resolve())
-                        self.assertNotEqual(run(release_b / "scripts/install.py", "install", env=env, ok=False).returncode, 0)
+                        converted = json.loads(run(release_b / "scripts/install.py", "install", env=env).stdout)
+                        self.assertTrue(converted["ok"]); self.assertFalse(target.is_symlink()); self.assertEqual((target / "release-marker.txt").read_text(), "B")
+                        self.assertTrue(json.loads(run(release_b / "scripts/install.py", "install", "--link", env=env).stdout)["ok"])
                         self.assertTrue(target.is_symlink()); self.assertEqual(target.resolve(), release_b.resolve())
                         target.unlink(); target.symlink_to(release_a, target_is_directory=True)
                         self.assertNotEqual(run(release_b / "scripts/install.py", "install", "--link", env=env, ok=False).returncode, 0)
@@ -306,6 +321,33 @@ class GovernanceTests(unittest.TestCase):
                         self.assertNotEqual(run(release_b / "scripts/install.py", "install", "--link", env=env, ok=False).returncode, 0)
                     else:
                         self.assertFalse(target.is_symlink()); self.assertEqual((target / "release-marker.txt").read_text(), "B")
+        with tempfile.TemporaryDirectory() as temp:
+            legacy = Path(temp) / "v0.1.0"; release_copy(legacy, "0.1.0", "legacy")
+            home, codex, env = isolated(temp)
+            linked = json.loads(run(legacy / "scripts/install.py", "install", "--link", env=env).stdout)
+            target = home / ".agents/skills/govern-agent-system"
+            self.assertTrue(linked["ok"] and target.is_symlink() and target.resolve() == legacy.resolve())
+            converted = json.loads(run(INSTALL, "install", env=env).stdout)
+            manifest = json.loads((codex / "agent-system/managed-install.json").read_text())
+            self.assertTrue(converted["ok"]); self.assertFalse(target.is_symlink()); self.assertTrue(target.is_dir())
+            self.assertEqual((manifest["installer_version"], manifest["link"], manifest["skill"]["target"]), ("0.1.1", False, None))
+            restored = json.loads(run(INSTALL, "rollback", "--snapshot", converted["snapshot"], env=env).stdout)
+            legacy_manifest = json.loads((codex / "agent-system/managed-install.json").read_text())
+            self.assertTrue(restored["ok"]); self.assertTrue(target.is_symlink()); self.assertEqual(target.resolve(), legacy.resolve())
+            self.assertEqual((legacy_manifest["installer_version"], legacy_manifest["link"]), ("0.1.0", True))
+            self.assertTrue(json.loads(run(legacy / "scripts/install.py", "install", "--link", env=env).stdout)["ok"])
+    def test_isolated_install_update_and_rollback_leave_mcp_untouched(self):
+        with tempfile.TemporaryDirectory() as temp:
+            release_a, release_b = Path(temp) / "release-a", Path(temp) / "release-b"
+            release_copy(release_a, "0.1.0", "A"); release_copy(release_b, "0.1.1", "B")
+            home, codex, env = isolated(temp); codex.mkdir(parents=True)
+            mcp_config = codex / "mcp.toml"; before = b"[mcp]\nendpoint = 'unchanged'\n"; mcp_config.write_bytes(before)
+            first = json.loads(run(release_a / "scripts/install.py", "install", env=env).stdout)
+            updated = json.loads(run(release_b / "scripts/install.py", "install", env=env).stdout)
+            restored = json.loads(run(release_b / "scripts/install.py", "rollback", "--snapshot", updated["snapshot"], env=env).stdout)
+            self.assertTrue(first["ok"] and updated["ok"] and restored["ok"])
+            self.assertFalse(first["mcp_touched"]); self.assertFalse(updated["mcp_touched"]); self.assertFalse(restored["mcp_touched"])
+            self.assertEqual(mcp_config.read_bytes(), before)
     def test_config_order_audit_and_canonical_skill_identity(self):
         rendered = []
         for seed in ("1", "2", "3", "4"):
@@ -334,6 +376,16 @@ class GovernanceTests(unittest.TestCase):
             self.assertEqual(Path(result["installed"]), installed)
             assignment = json.loads(run(installed / "scripts/agent_system.py", "dispatch", "--cwd", str(renamed), "--request", json.dumps({"parent_model":"gpt-5.6-sol","parent_reasoning_effort":"high","task_type":"implementation","known_target":True,"factual_uncertainty":[]}), env=env).stdout)["assignment"]
             self.assertIn('python3 "$HOME/.agents/skills/govern-agent-system/scripts/agent_system.py"', assignment)
+    def test_release_version_diagnostics_are_consistent(self):
+        expected = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+        self.assertEqual(run(INSTALL, "--version").stdout.strip(), expected)
+        self.assertEqual(run(CORE, "--version").stdout.strip(), expected)
+        with tempfile.TemporaryDirectory() as temp:
+            home, codex, env = isolated(temp)
+            self.assertEqual(json.loads(run(INSTALL, "check", env=env).stdout)["release_version"], expected)
+            run(CORE, "generate", "--cwd", str(ROOT), env=env)
+            for command in ("audit", "evaluate", "verify"):
+                self.assertEqual(json.loads(run(CORE, command, "--cwd", str(ROOT), env=env).stdout)["release_version"], expected)
     def test_chart_determinism_and_public_scan(self):
         run(ROOT / "scripts" / "render_charts.py")
         before = (ROOT / "docs/assets/instruction-bytes.svg").read_bytes(); run(ROOT / "scripts" / "render_charts.py")
