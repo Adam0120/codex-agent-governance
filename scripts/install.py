@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import ntpath
 import os
 import shutil
 import stat
@@ -97,15 +98,21 @@ def lexical_path_key(path: Path) -> str:
     return os.path.normcase(os.path.normpath(str(lexical_path(path))))
 
 
+def normalize_windows_link_target(raw: str) -> str:
+    if raw.startswith("\\\\?\\UNC\\"):
+        raw = "\\\\" + raw[8:]
+    elif raw.startswith("\\\\?\\"):
+        raw = raw[4:]
+    return ntpath.normcase(ntpath.normpath(raw))
+
+
 def existing_lexical_symlink_target(path: Path) -> Path:
     if not path.is_symlink():
         raise InstallError(f"managed Skill reparse point is not a symlink: {path}")
     try:
         raw = os.readlink(path)
-        if raw.startswith("\\\\?\\UNC\\"):
-            raw = "\\\\" + raw[8:]
-        elif raw.startswith("\\\\?\\"):
-            raw = raw[4:]
+        if os.name == "nt":
+            raw = normalize_windows_link_target(raw)
         target = Path(raw)
         if not target.is_absolute():
             target = path.parent / target

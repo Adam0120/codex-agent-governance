@@ -228,9 +228,10 @@ class GovernanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / "home"; skill = home / ".agents/skills/govern-agent-system"
             source = Path(temp) / "source"; source.mkdir(); skill.parent.mkdir(parents=True); skill.symlink_to(source, target_is_directory=True)
-            extended_target = "\\\\?\\" + str(source.resolve())
-            with mock.patch.object(installer.os, "readlink", return_value=extended_target):
-                installer.validate_chain(skill, home, allow_final_symlink_to=source.resolve())
+            self.assertEqual(installer.normalize_windows_link_target(r"\\?\C:/Release/Skill"), r"c:\release\skill")
+            self.assertEqual(installer.normalize_windows_link_target(r"\\?\UNC\Server\Share\Release"), r"\\server\share\release")
+            self.assertEqual(installer.normalize_windows_link_target(r"\??\C:\Release\Skill"), r"\??\c:\release\skill")
+            installer.validate_chain(skill, home, allow_final_symlink_to=source.resolve())
             skill.unlink(); alternate = Path(temp) / "alternate"; alternate.symlink_to(source, target_is_directory=True)
             skill.symlink_to(alternate, target_is_directory=True)
             with self.assertRaises(installer.InstallError):
