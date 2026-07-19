@@ -228,10 +228,10 @@ class GovernanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / "home"; skill = home / ".agents/skills/govern-agent-system"
             source = Path(temp) / "source"; source.mkdir(); skill.parent.mkdir(parents=True); skill.symlink_to(source, target_is_directory=True)
-            self.assertEqual(installer.normalize_windows_link_target(r"\\?\C:/Release/Skill"), r"c:\release\skill")
+            self.assertEqual(installer.normalize_windows_link_target(r"\\?\C:/Users/RUNNER~1/AppData/Release"), r"c:\users\runner~1\appdata\release")
             self.assertEqual(installer.normalize_windows_link_target(r"\\?\UNC\Server\Share\Release"), r"\\server\share\release")
             self.assertEqual(installer.normalize_windows_link_target(r"\??\C:\Release\Skill"), r"\??\c:\release\skill")
-            installer.validate_chain(skill, home, allow_final_symlink_to=source.resolve())
+            installer.validate_chain(skill, home, allow_final_symlink_to=source)
             skill.unlink(); alternate = Path(temp) / "alternate"; alternate.symlink_to(source, target_is_directory=True)
             skill.symlink_to(alternate, target_is_directory=True)
             with self.assertRaises(installer.InstallError):
@@ -247,6 +247,24 @@ class GovernanceTests(unittest.TestCase):
                  mock.patch.object(installer.Path, "is_symlink", return_value=False):
                 with self.assertRaises(installer.InstallError):
                     installer.validate_chain(skill, home, allow_final_symlink_to=source)
+        with tempfile.TemporaryDirectory() as temp:
+            actual_parent = Path(temp) / "actual-parent"; actual_parent.mkdir()
+            actual_release = actual_parent / "release"; release_copy(actual_release, "0.1.0", "lexical")
+            alias_parent = Path(temp) / "alias-parent"
+            try:
+                alias_parent.symlink_to(actual_parent, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+            alias_release = alias_parent / "release"; home, codex, env = isolated(Path(temp) / "install")
+            first = json.loads(run(alias_release / "scripts/install.py", "install", "--link", env=env).stdout)
+            manifest = json.loads((codex / "agent-system/managed-install.json").read_text())
+            recorded = str(alias_release.absolute())
+            self.assertEqual(manifest["skill"]["target"], recorded)
+            raw_target = os.readlink(Path(first["installed"]))
+            actual_identity = installer.normalize_windows_link_target(raw_target) if os.name == "nt" else raw_target
+            expected_identity = installer.normalize_windows_link_target(recorded) if os.name == "nt" else recorded
+            self.assertEqual(actual_identity, expected_identity)
+            self.assertTrue(json.loads(run(alias_release / "scripts/install.py", "install", "--link", env=env).stdout)["ok"])
         with tempfile.TemporaryDirectory() as temp:
             actual = Path(temp) / "actual"; actual.mkdir(); alias = Path(temp) / "alias"
             try:

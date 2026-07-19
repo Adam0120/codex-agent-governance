@@ -21,7 +21,7 @@ from typing import Any
 import agent_system as core
 import managed_lock
 
-SOURCE = Path(__file__).resolve().parents[1]
+SOURCE = Path(os.path.abspath(__file__)).parents[1]
 IDENTITY = "govern-agent-system"
 INSTALL_VERSION = "0.1.0"
 MANIFEST_SCHEMA = 1
