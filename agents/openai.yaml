@@ -1,0 +1,4 @@
+interface:
+  display_name: "Govern Agent System"
+  short_description: "Portable role governance control plane"
+  default_prompt: "Use $govern-agent-system to govern agent dispatch and generated adapters."

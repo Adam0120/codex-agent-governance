@@ -1,0 +1,13 @@
+{
+  "disclaimer": "These are anonymized observations and proxy checks, not a controlled benchmark or token billing.",
+  "instruction_bytes": {"before": 20462, "after": 7055},
+  "evaluation": {"passed": 36, "total": 36, "kind": "historical field observation", "source_category": "anonymized pre-extraction observation", "snapshot": "v0.1.0-extraction"},
+  "current_public_harness": {"passed": 14, "total": 14, "kind": "current local unittest cases; not the historical 36/36 observation"},
+  "fresh_process": {"passed": 4, "total": 4},
+  "adapters": {"passed": 8, "total": 8},
+  "ledger_events": 6,
+  "sensitive_fields": 0,
+  "observed_starts": {"implementation/other": 55, "release/deploy": 33, "review": 16, "diagnostic": 13, "locator": 7, "safety": 2, "architect": 1},
+  "mechanical_luna_compatibility": {"status": "not_live_validated", "method": "fresh HOME/CODEX_HOME temporary Git repository; codex exec accepted model flag but API authentication stopped before model execution", "claim": "generated bounded variant requires runtime model availability"},
+  "notes": ["A locator contract correction was made before the blind first-response pass.", "The values are proxies/observations, not model-token usage or billing."]
+}
