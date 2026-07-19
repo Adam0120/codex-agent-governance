@@ -475,7 +475,7 @@ class GovernanceTests(unittest.TestCase):
         finally:
             sys.path.pop(0)
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); managed = root / "managed"; managed.mkdir()
+            root = Path(temp).resolve(); managed = root / "managed"; managed.mkdir()
             target = managed / "secret"; target.write_bytes(b"managed\n"); target.chmod(0o644)
             outside = root / "outside"; outside.mkdir(); outside_target = outside / "secret"
             outside_target.write_bytes(b"outside\n"); outside_target.chmod(0o644)
