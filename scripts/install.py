@@ -23,7 +23,7 @@ import managed_lock
 
 SOURCE = Path(os.path.abspath(__file__)).parents[1]
 IDENTITY = "govern-agent-system"
-INSTALL_VERSION = "0.1.1"
+INSTALL_VERSION = "0.1.2"
 MANIFEST_SCHEMA = 1
 SNAPSHOT_SCHEMA = 2
 ROLE_NAMES = tuple(sorted(core.catalog()[0]))
@@ -31,10 +31,223 @@ SOURCE_IGNORED_PARTS = {".git", "__pycache__", ".pytest_cache", "build", "dist"}
 RUNTIME_IGNORED_PARTS = {"__pycache__", ".pytest_cache"}
 SHA256 = core.SHA256
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+SNAPSHOT_NAME = re.compile(r"^snapshot-[a-f0-9]{32}$")
 
 
 class InstallError(Exception):
     pass
+
+
+def private_permission_enforcement() -> str:
+    return "posix_mode" if os.name != "nt" else "not_available"
+
+
+def _descriptor_flags(*, directory: bool = False) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    return flags | (getattr(os, "O_DIRECTORY", 0) if directory else 0)
+
+
+def _owned_descriptor(fd: int, path: Path, kind: str, *, sensitive: bool = True) -> os.stat_result:
+    info = os.fstat(fd)
+    expected = stat.S_ISDIR(info.st_mode) if kind == "directory" else stat.S_ISREG(info.st_mode)
+    if not expected or info.st_uid != os.geteuid() or (kind == "file" and sensitive and info.st_nlink != 1):
+        raise InstallError(f"unsafe managed permission target: {path}")
+    return info
+
+
+def _open_owned_at(parent_fd: int, name: str, path: Path, kind: str, *, sensitive: bool = True) -> int:
+    try:
+        fd = os.open(name, _descriptor_flags(directory=kind == "directory"), dir_fd=parent_fd)
+    except OSError as exc:
+        raise InstallError(f"unsafe managed permission target: {path}: {exc}") from exc
+    try:
+        info = _owned_descriptor(fd, path, kind, sensitive=sensitive)
+        visible = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (visible.st_dev, visible.st_ino) != (info.st_dev, info.st_ino):
+            raise InstallError(f"managed permission target changed while opening: {path}")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _apply_private_modes(targets: list[tuple[int, int, str, Path, int]]) -> None:
+    changed: list[tuple[int, int]] = []
+    try:
+        for fd, parent_fd, name, path, mode in targets:
+            before = os.fstat(fd)
+            visible = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if (visible.st_dev, visible.st_ino) != (before.st_dev, before.st_ino):
+                raise InstallError(f"managed permission target changed before remediation: {path}")
+            original = stat.S_IMODE(before.st_mode)
+            os.fchmod(fd, mode)
+            changed.append((fd, original))
+            after = os.fstat(fd)
+            visible = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if (visible.st_dev, visible.st_ino) != (after.st_dev, after.st_ino) or stat.S_IMODE(after.st_mode) & 0o077:
+                raise InstallError(f"managed permission target remains unsafe: {path}")
+    except (InstallError, OSError) as exc:
+        rollback_error: OSError | None = None
+        for fd, original in reversed(changed):
+            try:
+                os.fchmod(fd, original)
+            except OSError as restore_exc:
+                rollback_error = restore_exc
+        if rollback_error is not None:
+            raise InstallError(f"permission remediation and rollback failed: {exc}; {rollback_error}") from exc
+        if isinstance(exc, InstallError):
+            raise
+        raise InstallError(f"cannot restrict managed permission target: {exc}") from exc
+
+
+def _descriptor_bytes(fd: int) -> bytes:
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _collect_open_tree(fd: int, path: Path, targets: list[tuple[int, int, str, Path, int]], *, source_tree: bool = False) -> str:
+    ignored = SOURCE_IGNORED_PARTS if source_tree else RUNTIME_IGNORED_PARTS
+    records: list[tuple[str, bytes]] = []
+
+    def walk(directory_fd: int, relative: Path) -> None:
+        try:
+            names = sorted(os.listdir(directory_fd))
+        except OSError as exc:
+            raise InstallError(f"cannot inspect managed permission tree: {path / relative}: {exc}") from exc
+        for child_name in names:
+            child_relative = relative / child_name
+            child_path = path / child_relative
+            try:
+                child_fd = os.open(child_name, _descriptor_flags(), dir_fd=directory_fd)
+            except OSError as exc:
+                raise InstallError(f"unsafe managed permission tree entry: {child_path}: {exc}") from exc
+            try:
+                info = os.fstat(child_fd)
+                visible = os.stat(child_name, dir_fd=directory_fd, follow_symlinks=False)
+                if (visible.st_dev, visible.st_ino) != (info.st_dev, info.st_ino) or info.st_uid != os.geteuid():
+                    raise InstallError(f"managed permission tree entry changed or is not owned: {child_path}")
+                skipped = any(part in ignored for part in child_relative.parts) or child_relative.suffix == ".pyc"
+                encoded = child_relative.as_posix().encode("utf-8")
+                if stat.S_ISDIR(info.st_mode):
+                    targets.append((child_fd, directory_fd, child_name, child_path, 0o700))
+                    owned_fd = child_fd
+                    child_fd = -1
+                    if not skipped:
+                        records.append((child_relative.as_posix(), b"D\0" + encoded + b"\0"))
+                    walk(owned_fd, child_relative)
+                elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                    targets.append((child_fd, directory_fd, child_name, child_path, 0o600))
+                    if not skipped:
+                        records.append((child_relative.as_posix(), b"F\0" + encoded + b"\0" + hashlib.sha256(_descriptor_bytes(child_fd)).digest()))
+                    child_fd = -1
+                else:
+                    raise InstallError(f"unsupported or hard-linked managed permission tree entry: {child_path}")
+            finally:
+                if child_fd >= 0:
+                    os.close(child_fd)
+    walk(fd, Path())
+    digest = hashlib.sha256()
+    for _, record in sorted(records):
+        digest.update(record)
+    return digest.hexdigest()
+
+
+def _collect_tree_targets(parent_fd: int, name: str, path: Path, targets: list[tuple[int, int, str, Path, int]]) -> str:
+    fd = _open_owned_at(parent_fd, name, path, "directory")
+    targets.append((fd, parent_fd, name, path, 0o700))
+    return _collect_open_tree(fd, path, targets)
+
+
+def restrict_path(path: Path, mode: int, kind: str) -> None:
+    if os.name == "nt":
+        return
+    try:
+        parent_fd, _ = managed_lock.open_directory(path.parent)
+    except managed_lock.LockError as exc:
+        raise InstallError(str(exc)) from exc
+    fd: int | None = None
+    try:
+        fd = _open_owned_at(parent_fd, path.name, path, kind)
+        _apply_private_modes([(fd, parent_fd, path.name, path, mode)])
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(parent_fd)
+
+
+def restrict_tree(path: Path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        parent_fd, _ = managed_lock.open_directory(path.parent)
+    except managed_lock.LockError as exc:
+        raise InstallError(str(exc)) from exc
+    targets: list[tuple[int, int, str, Path, int]] = []
+    try:
+        _collect_tree_targets(parent_fd, path.name, path, targets)
+        _apply_private_modes(targets)
+    finally:
+        for fd, _, _, _, _ in reversed(targets):
+            os.close(fd)
+        os.close(parent_fd)
+
+
+def permission_problem(path: Path, kind: str) -> dict[str, str] | None:
+    if os.name == "nt":
+        return None
+    info = lstat_or_none(path)
+    if info is None:
+        return None
+    if is_link_or_reparse(info):
+        return {"path": str(path), "kind": kind, "reason": "unsafe_link_or_reparse"}
+    expected = 0o700 if kind == "directory" else 0o600
+    if (kind == "directory" and not stat.S_ISDIR(info.st_mode)) or (kind == "file" and not stat.S_ISREG(info.st_mode)):
+        return {"path": str(path), "kind": kind, "reason": "unexpected_type"}
+    if info.st_uid != os.geteuid():
+        return {"path": str(path), "kind": kind, "reason": "unexpected_owner"}
+    if kind == "file" and info.st_nlink != 1:
+        return {"path": str(path), "kind": kind, "reason": "unsafe_hard_link"}
+    actual = stat.S_IMODE(info.st_mode)
+    if actual & 0o077:
+        return {"path": str(path), "kind": kind, "reason": "group_or_other_access", "mode": f"{actual:04o}", "expected_mode": f"{expected:04o}"}
+    return None
+
+
+def permission_problems(p: dict[str, Path]) -> list[dict[str, str]]:
+    if os.name == "nt":
+        return []
+    problems: list[dict[str, str]] = []
+    for path, kind in ((p["config"], "file"), (p["state"], "directory")):
+        problem = permission_problem(path, kind)
+        if problem:
+            problems.append(problem)
+    state = p["state"]
+    info = lstat_or_none(state)
+    if info is None or is_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
+        return problems
+    stack = [state]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                children = [Path(entry.path) for entry in entries]
+        except OSError:
+            problems.append({"path": str(current), "kind": "directory", "reason": "unreadable"})
+            continue
+        for child in children:
+            child_info = lstat_or_none(child)
+            kind = "directory" if child_info is not None and stat.S_ISDIR(child_info.st_mode) and not is_link_or_reparse(child_info) else "file"
+            problem = permission_problem(child, kind)
+            if problem:
+                problems.append(problem)
+            if child_info is not None and not is_link_or_reparse(child_info) and stat.S_ISDIR(child_info.st_mode):
+                stack.append(child)
+    return problems
 
 
 def canonical(path: Path) -> Path:
@@ -67,6 +280,7 @@ def paths() -> dict[str, Path]:
         "lock": state / "install.lock",
         "manifest": state / "managed-install.json",
         "journal": state / "rollback-journal.json",
+        "ledger": state / "ledger.jsonl",
     }
 
 
@@ -164,11 +378,12 @@ def validate_destinations(p: dict[str, Path], *, allow_skill_symlink_to: Path | 
         (p["lock"], p["codex"]),
         (p["manifest"], p["codex"]),
         (p["journal"], p["codex"]),
+        (p["ledger"], p["codex"]),
         (p["skill"], p["skills"]),
     ):
         if not lexically_contained(child, root):
             raise InstallError(f"destination escapes its root: {child}")
-    for key in ("codex", "state", "agents", "config", "snapshots", "lock", "manifest", "journal", "skills"):
+    for key in ("codex", "state", "agents", "config", "snapshots", "lock", "manifest", "journal", "ledger", "skills"):
         validate_chain(p[key], managed_root(p, p[key]))
     validate_chain(p["skill"], p["home"], allow_final_symlink_to=allow_skill_symlink_to, skip_final=skip_skill_final)
     for name in ROLE_NAMES:
@@ -339,6 +554,8 @@ def inspect(p: dict[str, Path], writes: list[tuple[Path, str]]) -> dict[str, Any
         "managed": managed,
         "agent_conflicts": conflicts,
         "mcp_touched": False,
+        "permission_enforcement": private_permission_enforcement(),
+        "permission_problems": permission_problems(p),
     }
 
 
@@ -367,6 +584,7 @@ def hold_lock_for_test() -> None:
 
 def copy_file_verified(source: Path, target: Path, expected_hash: str) -> None:
     shutil.copy2(source, target)
+    restrict_path(target, 0o600, "file")
     if file_hash(target) != expected_hash:
         raise InstallError(f"staged file hash mismatch: {source}")
 
@@ -380,10 +598,143 @@ def snapshot_entries(p: dict[str, Path]) -> list[tuple[str, Path]]:
     ]
 
 
+def verified_snapshot_directories_windows(p: dict[str, Path]) -> list[Path]:
+    snapshots = p["snapshots"]
+    info = lstat_or_none(snapshots)
+    if info is None:
+        return []
+    if is_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
+        raise InstallError("unsafe managed snapshot root")
+    result: list[Path] = []
+    for snapshot in sorted(snapshots.iterdir(), key=lambda item: item.name):
+        snapshot_info = lstat_or_none(snapshot)
+        if snapshot_info is None or is_link_or_reparse(snapshot_info) or not stat.S_ISDIR(snapshot_info.st_mode) or not SNAPSHOT_NAME.fullmatch(snapshot.name):
+            raise InstallError(f"cannot prove managed snapshot ownership: {snapshot}")
+        _, entries = read_snapshot(str(snapshot), p)
+        expected = {"manifest.json"} | {entry["label"] for entry in entries if entry["kind"] in {"file", "directory"}}
+        actual = {item.name for item in snapshot.iterdir()}
+        if actual != expected:
+            raise InstallError(f"cannot prove managed snapshot contents: {snapshot}")
+        result.append(snapshot)
+    return result
+
+
+def _collect_verified_snapshots(
+    p: dict[str, Path],
+    snapshots_fd: int,
+    targets: list[tuple[int, int, str, Path, int]],
+) -> None:
+    for name in sorted(os.listdir(snapshots_fd)):
+        snapshot = p["snapshots"] / name
+        if not SNAPSHOT_NAME.fullmatch(name):
+            raise InstallError(f"cannot prove managed snapshot ownership: {snapshot}")
+        _, path_entries = read_snapshot(str(snapshot), p)
+        snapshot_fd = _open_owned_at(snapshots_fd, name, snapshot, "directory")
+        targets.append((snapshot_fd, snapshots_fd, name, snapshot, 0o700))
+        manifest_path = snapshot / "manifest.json"
+        manifest_fd = _open_owned_at(snapshot_fd, "manifest.json", manifest_path, "file")
+        targets.append((manifest_fd, snapshot_fd, "manifest.json", manifest_path, 0o600))
+        try:
+            document = json.loads(_descriptor_bytes(manifest_fd).decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise InstallError(f"invalid snapshot: {exc}") from exc
+        document = exact_keys(document, {"schema_version", "identity", "installer_version", "purpose", "entries"}, "snapshot")
+        if document["schema_version"] != SNAPSHOT_SCHEMA or document["identity"] != IDENTITY or not isinstance(document["installer_version"], str) or not VERSION.fullmatch(document["installer_version"]) or document["purpose"] not in {"install", "rollback-recovery"} or document["entries"] != path_entries:
+            raise InstallError("snapshot changed during provenance validation")
+        expected_names = {"manifest.json"} | {entry["label"] for entry in path_entries if entry["kind"] in {"file", "directory"}}
+        if set(os.listdir(snapshot_fd)) != expected_names:
+            raise InstallError(f"cannot prove managed snapshot contents: {snapshot}")
+        for entry in path_entries:
+            label, kind = entry["label"], entry["kind"]
+            item_path = snapshot / label
+            if kind == "file":
+                item_fd = _open_owned_at(snapshot_fd, label, item_path, "file")
+                targets.append((item_fd, snapshot_fd, label, item_path, 0o600))
+                if sha256_bytes(_descriptor_bytes(item_fd)) != entry["sha256"]:
+                    raise InstallError("snapshot file content changed during permission validation")
+            elif kind == "directory":
+                digest = _collect_tree_targets(snapshot_fd, label, item_path, targets)
+                if digest != entry["sha256"]:
+                    raise InstallError("snapshot directory content changed during permission validation")
+
+
+def harden_existing_managed_permissions(p: dict[str, Path], lock: managed_lock.LockHandle) -> None:
+    manifest_document = load_managed_manifest(p)
+    if manifest_document is None:
+        return
+    if os.name == "nt":
+        state = p["state"]
+        validate_chain(state, p["codex"])
+        info = lstat_or_none(state)
+        if info is None or is_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            raise InstallError("unsafe managed state root")
+        allowed = {p["snapshots"].name, p["manifest"].name, p["journal"].name, p["lock"].name, p["ledger"].name}
+        if any(item.name not in allowed for item in state.iterdir()):
+            raise InstallError("cannot prove managed state ownership")
+        for path in (p["manifest"], p["journal"], p["lock"], p["ledger"]):
+            item = lstat_or_none(path)
+            if item is not None and (is_link_or_reparse(item) or not stat.S_ISREG(item.st_mode)):
+                raise InstallError(f"unsafe managed permission target: {path}")
+        verified_snapshot_directories_windows(p)
+        return
+    try:
+        managed_lock.verify(lock)
+        codex_fd, _ = managed_lock.open_directory(p["codex"])
+    except managed_lock.LockError as exc:
+        raise InstallError(str(exc)) from exc
+    if lock.parent_fd is None:
+        os.close(codex_fd)
+        raise InstallError("POSIX managed lock did not retain its rooted directory")
+    state_fd = os.dup(lock.parent_fd)
+    targets: list[tuple[int, int, str, Path, int]] = []
+    state = p["state"]
+    try:
+        state_info = _owned_descriptor(state_fd, state, "directory")
+        visible_state = os.stat(state.name, dir_fd=codex_fd, follow_symlinks=False)
+        if (visible_state.st_dev, visible_state.st_ino) != (state_info.st_dev, state_info.st_ino):
+            raise InstallError("managed state root was replaced while the lock was held")
+        targets.append((state_fd, codex_fd, state.name, state, 0o700))
+        state_fd = -1
+        anchored_state_fd = targets[0][0]
+        allowed = {p["snapshots"].name, p["manifest"].name, p["journal"].name, p["lock"].name, p["ledger"].name}
+        actual = set(os.listdir(anchored_state_fd))
+        if not {p["manifest"].name, p["lock"].name}.issubset(actual) or actual - allowed:
+            raise InstallError("cannot prove managed state ownership")
+        config_fd = _open_owned_at(codex_fd, p["config"].name, p["config"], "file")
+        targets.append((config_fd, codex_fd, p["config"].name, p["config"], 0o600))
+        opened_manifest: dict[str, Any] | None = None
+        for path in (p["manifest"], p["journal"], p["lock"], p["ledger"]):
+            if path.name not in actual:
+                continue
+            item_fd = _open_owned_at(anchored_state_fd, path.name, path, "file")
+            targets.append((item_fd, anchored_state_fd, path.name, path, 0o600))
+            if path == p["manifest"]:
+                try:
+                    opened_manifest = json.loads(_descriptor_bytes(item_fd).decode("utf-8"))
+                except (UnicodeError, json.JSONDecodeError) as exc:
+                    raise InstallError(f"malformed managed manifest: {exc}") from exc
+        if validate_manifest_document(opened_manifest, p, verify_content=True) != manifest_document:
+            raise InstallError("managed manifest changed during permission validation")
+        if p["snapshots"].name in actual:
+            snapshots_fd = _open_owned_at(anchored_state_fd, p["snapshots"].name, p["snapshots"], "directory")
+            targets.append((snapshots_fd, anchored_state_fd, p["snapshots"].name, p["snapshots"], 0o700))
+            _collect_verified_snapshots(p, snapshots_fd, targets)
+        _apply_private_modes(targets)
+    finally:
+        if state_fd >= 0:
+            os.close(state_fd)
+        for fd, _, _, _, _ in reversed(targets):
+            os.close(fd)
+        os.close(codex_fd)
+
+
 def create_snapshot(p: dict[str, Path], purpose: str) -> Path:
     mkdir_safe(p["snapshots"], p)
+    restrict_path(p["state"], 0o700, "directory")
+    restrict_path(p["snapshots"], 0o700, "directory")
     target = p["snapshots"] / f"snapshot-{uuid.uuid4().hex}"
-    target.mkdir()
+    target.mkdir(mode=0o700)
+    restrict_path(target, 0o700, "directory")
     entries: list[dict[str, Any]] = []
     try:
         for label, path in snapshot_entries(p):
@@ -401,6 +752,7 @@ def create_snapshot(p: dict[str, Path], purpose: str) -> Path:
             elif stat.S_ISDIR(info.st_mode):
                 expected_hash = tree_hash(path)
                 shutil.copytree(path, target / label)
+                restrict_tree(target / label)
                 copied_hash = tree_hash(target / label)
                 if copied_hash != expected_hash:
                     raise InstallError(f"snapshot directory changed while copying: {path}")
@@ -415,7 +767,9 @@ def create_snapshot(p: dict[str, Path], purpose: str) -> Path:
             "purpose": purpose,
             "entries": entries,
         }
-        (target / "manifest.json").write_text(json.dumps(document, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        manifest = target / "manifest.json"
+        manifest.write_text(json.dumps(document, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        restrict_path(manifest, 0o600, "file")
         return target
     except Exception:
         shutil.rmtree(target, ignore_errors=True)
@@ -427,8 +781,12 @@ def read_snapshot(raw: str, p: dict[str, Path]) -> tuple[Path, list[dict[str, An
     if not lexically_contained(source, p["snapshots"]):
         raise InstallError("snapshot is outside current snapshot root")
     validate_chain(source, p["codex"])
+    manifest_path = source / "manifest.json"
+    manifest_info = lstat_or_none(manifest_path)
+    if manifest_info is None or is_link_or_reparse(manifest_info) or not stat.S_ISREG(manifest_info.st_mode):
+        raise InstallError("invalid snapshot manifest path")
     try:
-        document = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise InstallError(f"invalid snapshot: {exc}") from exc
     document = exact_keys(document, {"schema_version", "identity", "installer_version", "purpose", "entries"}, "snapshot")
@@ -504,6 +862,7 @@ def stage_file(parent: Path, content: bytes, p: dict[str, Path]) -> Path:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
+        restrict_path(path, 0o600, "file")
         return path
     except Exception:
         path.unlink(missing_ok=True)
@@ -572,6 +931,7 @@ def remove_path(path: Path) -> None:
 
 def write_journal(p: dict[str, Path], document: dict[str, Any]) -> None:
     mkdir_safe(p["state"], p)
+    restrict_path(p["state"], 0o700, "directory")
     raw = (json.dumps(document, sort_keys=True, indent=2) + "\n").encode("utf-8")
     temp = stage_file(p["state"], raw, p)
     os.replace(temp, p["journal"])
@@ -770,6 +1130,8 @@ def install(link: bool) -> dict[str, Any]:
         status = inspect(p, writes)
         if not status["ok"]:
             raise InstallError("refusing unmanaged collision or unsafe destination")
+        if status["managed"]:
+            harden_existing_managed_permissions(p, lock)
         staged, _ = build_install_staging(p, writes, link)
         try:
             saved = create_snapshot(p, "install")
@@ -841,7 +1203,7 @@ def check() -> dict[str, Any]:
         _, writes = build_generation_plan(p)
         return {**inspect(p, writes), "release_version": INSTALL_VERSION}
     except InstallError as exc:
-        return {"ok": False, "error": str(exc), "skill": str(p["skill"]), "managed": False, "agent_conflicts": [], "mcp_touched": False, "release_version": INSTALL_VERSION}
+        return {"ok": False, "error": str(exc), "skill": str(p["skill"]), "managed": False, "agent_conflicts": [], "mcp_touched": False, "permission_enforcement": private_permission_enforcement(), "permission_problems": [], "release_version": INSTALL_VERSION}
 
 
 def fail(message: str) -> None:

@@ -23,7 +23,7 @@ import managed_lock
 
 ROOT = Path(__file__).resolve().parents[1]
 REF = ROOT / "references"
-RELEASE_VERSION = "0.1.1"
+RELEASE_VERSION = "0.1.2"
 SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 PARENT_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra"}

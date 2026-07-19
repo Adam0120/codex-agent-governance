@@ -2,6 +2,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,25 @@ def state_bytes(home, codex):
                     continue
                 if path.is_symlink(): result[f"{root}:{relative}"] = ("symlink", os.readlink(path))
                 elif path.is_file(): result[f"{root}:{relative}"] = ("file", path.read_bytes())
+    return result
+
+def private_mode(path, mode):
+    return stat.S_IMODE(path.lstat().st_mode) == mode
+
+def mode_byte_state(root):
+    result = {}
+    if not root.exists() and not root.is_symlink():
+        return result
+    for path in [root, *sorted(root.rglob("*"))]:
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        info = path.lstat()
+        if path.is_symlink():
+            payload = ("symlink", os.readlink(path))
+        elif path.is_file():
+            payload = ("file", path.read_bytes())
+        else:
+            payload = ("directory", None)
+        result[relative] = (stat.S_IMODE(info.st_mode), payload)
     return result
 
 def release_copy(target, version, marker):
@@ -330,7 +350,7 @@ class GovernanceTests(unittest.TestCase):
             converted = json.loads(run(INSTALL, "install", env=env).stdout)
             manifest = json.loads((codex / "agent-system/managed-install.json").read_text())
             self.assertTrue(converted["ok"]); self.assertFalse(target.is_symlink()); self.assertTrue(target.is_dir())
-            self.assertEqual((manifest["installer_version"], manifest["link"], manifest["skill"]["target"]), ("0.1.1", False, None))
+            self.assertEqual((manifest["installer_version"], manifest["link"], manifest["skill"]["target"]), ("0.1.2", False, None))
             restored = json.loads(run(INSTALL, "rollback", "--snapshot", converted["snapshot"], env=env).stdout)
             legacy_manifest = json.loads((codex / "agent-system/managed-install.json").read_text())
             self.assertTrue(restored["ok"]); self.assertTrue(target.is_symlink()); self.assertEqual(target.resolve(), legacy.resolve())
@@ -348,6 +368,129 @@ class GovernanceTests(unittest.TestCase):
             self.assertTrue(first["ok"] and updated["ok"] and restored["ok"])
             self.assertFalse(first["mcp_touched"]); self.assertFalse(updated["mcp_touched"]); self.assertFalse(restored["mcp_touched"])
             self.assertEqual(mcp_config.read_bytes(), before)
+    @unittest.skipIf(os.name == "nt", "POSIX modes are not Windows ACL guarantees")
+    def test_snapshot_permissions_diagnose_and_remediate_legacy_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home, codex, env = isolated(temp); codex.mkdir(mode=0o755)
+            config = codex / "config.toml"; baseline = b"[other]\nkeep = true\n"; config.write_bytes(baseline); config.chmod(0o644)
+            mcp_config = codex / "mcp.toml"; mcp_before = b"[mcp]\nendpoint = 'unchanged'\n"; mcp_config.write_bytes(mcp_before)
+            first = json.loads(run(INSTALL, "install", env=env).stdout)
+            state = codex / "agent-system"; snapshots = state / "snapshots"; legacy = Path(first["snapshot"])
+            for path in [state, snapshots, legacy, *legacy.rglob("*")]:
+                if path.is_dir(): path.chmod(0o755)
+                elif path.is_file(): path.chmod(0o644)
+            before_modes = {str(path): stat.S_IMODE(path.lstat().st_mode) for path in [state, snapshots, legacy, *legacy.rglob("*")]}
+            diagnosis = json.loads(run(INSTALL, "check", env=env).stdout)
+            self.assertTrue(diagnosis["permission_problems"]); self.assertEqual(before_modes, {str(path): stat.S_IMODE(path.lstat().st_mode) for path in [state, snapshots, legacy, *legacy.rglob("*")]})
+            self.assertTrue(json.loads(run(INSTALL, "install", env=env).stdout)["ok"])
+            checked = json.loads(run(INSTALL, "check", env=env).stdout); self.assertEqual(checked["permission_problems"], [])
+            for path in [state, snapshots, *snapshots.rglob("*")]:
+                if path.is_dir(): self.assertTrue(private_mode(path, 0o700), path)
+                elif path.is_file(): self.assertTrue(private_mode(path, 0o600), path)
+            self.assertEqual(mcp_config.read_bytes(), mcp_before)
+            self.assertTrue(json.loads(run(INSTALL, "rollback", "--snapshot", first["snapshot"], env=env).stdout)["ok"])
+            self.assertEqual(config.read_bytes(), baseline); self.assertEqual(mcp_config.read_bytes(), mcp_before)
+        with tempfile.TemporaryDirectory() as temp:
+            home, codex, env = isolated(temp); first = json.loads(run(INSTALL, "install", env=env).stdout)
+            snapshot = Path(first["snapshot"]); outside = Path(temp) / "outside-manifest"; outside.write_text("foreign\n")
+            manifest = snapshot / "manifest.json"; manifest.unlink(); manifest.symlink_to(outside)
+            diagnosis = json.loads(run(INSTALL, "check", env=env).stdout)
+            self.assertTrue(any(problem["reason"] == "unsafe_link_or_reparse" for problem in diagnosis["permission_problems"]))
+            before = state_bytes(home, codex); blocked = run(INSTALL, "install", env=env, ok=False)
+            self.assertIn("invalid snapshot manifest path", blocked.stderr); self.assertEqual(state_bytes(home, codex), before); self.assertEqual(outside.read_text(), "foreign\n")
+    @unittest.skipIf(os.name == "nt", "POSIX modes are not Windows ACL guarantees")
+    def test_legacy_ledger_upgrade_and_lock_failure_permission_boundary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home, codex, env = isolated(temp); json.loads(run(INSTALL, "install", env=env).stdout)
+            state = codex / "agent-system"; ledger = state / "ledger.jsonl"
+            ledger_bytes = b'{"compact":"event"}\n'; ledger.write_bytes(ledger_bytes)
+            for path in [codex / "config.toml", state, state / "snapshots", ledger, *state.rglob("snapshot-*")]:
+                if path.is_dir(): path.chmod(0o755)
+                elif path.is_file(): path.chmod(0o644)
+            stale = state / "install.lock"; stale.write_bytes(b"stale-lock-bytes\n"); stale.chmod(0o644)
+            before = mode_byte_state(codex)
+            blocked = run(INSTALL, "install", env=env, ok=False)
+            self.assertIn("INSTALL_LOCKED", blocked.stderr)
+            self.assertEqual(mode_byte_state(codex), before)
+            stale.unlink()
+            self.assertTrue(json.loads(run(INSTALL, "install", env=env).stdout)["ok"])
+            self.assertEqual(ledger.read_bytes(), ledger_bytes)
+            self.assertTrue(private_mode(ledger, 0o600))
+            self.assertEqual(json.loads(run(INSTALL, "check", env=env).stdout)["permission_problems"], [])
+        with tempfile.TemporaryDirectory() as temp:
+            home, codex, env = isolated(temp); json.loads(run(INSTALL, "install", env=env).stdout)
+            state = codex / "agent-system"; lock = state / "install.lock"
+            holder_code = (
+                "import sys,time; from pathlib import Path; "
+                f"sys.path.insert(0,{str(INSTALL.parent)!r}); import managed_lock; "
+                "held=managed_lock.acquire(Path(sys.argv[1]),Path(sys.argv[2])); "
+                "print('ready',flush=True); time.sleep(2); managed_lock.release(held)"
+            )
+            holder = subprocess.Popen([sys.executable, "-c", holder_code, str(lock), str(codex)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+            self.assertEqual(holder.stdout.readline().strip(), "ready")
+            for path in [codex / "config.toml", state, state / "snapshots", *state.rglob("snapshot-*")]:
+                if path.is_dir(): path.chmod(0o755)
+                elif path.is_file(): path.chmod(0o644)
+            before = mode_byte_state(codex)
+            blocked = run(INSTALL, "install", env=env, ok=False)
+            self.assertIn("INSTALL_LOCKED", blocked.stderr)
+            self.assertEqual(mode_byte_state(codex), before)
+            _, stderr = holder.communicate(timeout=10)
+            self.assertEqual(holder.returncode, 0, stderr)
+    @unittest.skipIf(os.name == "nt", "POSIX descriptor and hard-link guarantees")
+    def test_managed_permission_state_rejects_unknown_links_and_hard_links(self):
+        for kind in ("unknown", "ledger-symlink", "ledger-hardlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
+                home, codex, env = isolated(temp); json.loads(run(INSTALL, "install", env=env).stdout)
+                state = codex / "agent-system"; outside = Path(temp) / "outside"
+                outside.write_bytes(b"outside-bytes\n")
+                if kind == "unknown":
+                    (state / "foreign.bin").write_bytes(b"foreign\n")
+                elif kind == "ledger-symlink":
+                    (state / "ledger.jsonl").symlink_to(outside)
+                else:
+                    os.link(outside, state / "ledger.jsonl")
+                state.chmod(0o755)
+                before_state, before_outside = mode_byte_state(state), mode_byte_state(outside)
+                blocked = run(INSTALL, "install", env=env, ok=False)
+                self.assertNotEqual(blocked.returncode, 0)
+                self.assertEqual(mode_byte_state(state), before_state)
+                self.assertEqual(mode_byte_state(outside), before_outside)
+    def test_windows_permission_diagnostic_is_explicit_and_non_mutating(self):
+        spec = util.spec_from_file_location("governance_installer_windows_permission_test", INSTALL)
+        installer = util.module_from_spec(spec); sys.path.insert(0, str(INSTALL.parent))
+        try:
+            spec.loader.exec_module(installer)
+        finally:
+            sys.path.pop(0)
+        with mock.patch.object(installer.os, "name", "nt"):
+            self.assertEqual(installer.private_permission_enforcement(), "not_available")
+            self.assertEqual(installer.permission_problems({}), [])
+    @unittest.skipIf(os.name == "nt", "POSIX descriptor-rooted mutation seam")
+    def test_permission_mutation_stays_on_opened_parent_during_component_replacement(self):
+        spec = util.spec_from_file_location("governance_installer_descriptor_test", INSTALL)
+        installer = util.module_from_spec(spec); sys.path.insert(0, str(INSTALL.parent))
+        try:
+            spec.loader.exec_module(installer)
+        finally:
+            sys.path.pop(0)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); managed = root / "managed"; managed.mkdir()
+            target = managed / "secret"; target.write_bytes(b"managed\n"); target.chmod(0o644)
+            outside = root / "outside"; outside.mkdir(); outside_target = outside / "secret"
+            outside_target.write_bytes(b"outside\n"); outside_target.chmod(0o644)
+            original_open = installer.managed_lock.open_directory
+            def swap_after_open(path, *, create=False):
+                fd, created = original_open(path, create=create)
+                moved = root / "managed-opened"
+                managed.rename(moved); managed.symlink_to(outside, target_is_directory=True)
+                return fd, created
+            with mock.patch.object(installer.managed_lock, "open_directory", side_effect=swap_after_open):
+                installer.restrict_path(target, 0o600, "file")
+            self.assertEqual((root / "managed-opened/secret").read_bytes(), b"managed\n")
+            self.assertTrue(private_mode(root / "managed-opened/secret", 0o600))
+            self.assertEqual(outside_target.read_bytes(), b"outside\n")
+            self.assertEqual(stat.S_IMODE(outside_target.lstat().st_mode), 0o644)
     def test_config_order_audit_and_canonical_skill_identity(self):
         rendered = []
         for seed in ("1", "2", "3", "4"):

@@ -33,6 +33,8 @@ python3 scripts/agent_system.py evaluate --cwd "$PWD"
 
 位置从 `CODEX_HOME` 或 `~/.codex` 和 `$HOME/.agents/skills` 解析。安装器拒绝未受管理冲突，完整快照 Skill/适配器/配置，原子安装，仅安全合并 `[agents]` 受管理键，绝不修改 MCP 配置。
 
+在 POSIX 上，安装器拥有的状态和快照目录会限制为 `0700`，快照、受管理配置、清单、journal 和可选控制器 ledger 会限制为 `0600`。`check` 只读并报告 `permission_problems`；后续受管理安装取得共享锁并重新验证清单/快照来源后，才加固已验证的受管理状态。权限变更从可信目录描述符开始、逐级禁止跟随链接，并验证所有权与 inode 连续性；敏感硬链接会被拒绝，ledger 内容不会被读取或保存。状态不安全或无法证明归属时会默认拒绝：不要跟随链接，先检查报告路径，仅限制已验证的普通目录/文件，然后重新运行 `check`。Windows 保留 reparse point 拒绝，但不声称提供等价的 POSIX ACL 保证。
+
 规范 Skill 身份与目标固定为 `$govern-agent-system` 和 `$HOME/.agents/skills/govern-agent-system`，不依赖 checkout 目录名。HOME 与 CODEX_HOME 的平台别名只规范化一次，并拒绝可信根及其下方的链接或 reparse point。安装、独立回滚和直接生成在完整写入批次内共用一个受限、禁止跟随链接的锁；已有或崩溃遗留的锁会以 `INSTALL_LOCKED` 默认拒绝且不修改受管状态。精确版本清单绑定规范目标和内容哈希；A→B 更新先按 A 自己记录的来源验证 A，再暂存 B。若自动恢复无法验证，`recovery_failed` journal 会阻止所有受管写入，并在取得共享锁后再次检查。只有 `rollback --recover --snapshot <journal 中的 recovery_snapshot>` 才能解除；失败重试始终保留最初的已知良好快照锚点，成功时会按该锚点验证全部受管目标后才清除 journal。
 
 ## 架构、路由与安全
@@ -82,7 +84,7 @@ stateDiagram-v2
 <p align="center"><img src="docs/assets/instruction-bytes.svg" alt="观察代理：指令字节 20,462 到 7,055；不是 token 计费" width="760"></p>
 <p align="center"><img src="docs/assets/observed-starts.svg" alt="按类别的观察代理启动数据；不是 token 计费" width="760"></p>
 
-匿名 [观察数据](benchmarks/observations.json)：指令字节代理 20,462 → 7,055；历史现场观察评估 36/36（不是当前公开 harness）；当前公开 unittest 为 16/16；全新进程 4/4；适配器 8/8；六个账本事件、零敏感字段。生成的 `mechanical_luna` 受限变体要求运行时模型可用；本机隔离 CLI 探测在 API 认证阶段停止，未完成 Luna 实机验证或成功 smoke。定位器契约修正在盲测首响应之前完成。这些是观察/代理，不是受控 benchmark，也不是 token 计费。
+匿名 [观察数据](benchmarks/observations.json)：指令字节代理 20,462 → 7,055；历史现场观察评估 36/36（不是当前公开 harness）；当前公开 unittest 为 21/21；全新进程 4/4；适配器 8/8；六个账本事件、零敏感字段。生成的 `mechanical_luna` 受限变体要求运行时模型可用；本机隔离 CLI 探测在 API 认证阶段停止，未完成 Luna 实机验证或成功 smoke。定位器契约修正在盲测首响应之前完成。这些是观察/代理，不是受控 benchmark，也不是 token 计费。
 
 ## 测试与贡献
 

@@ -2,7 +2,7 @@
   "disclaimer": "These are anonymized observations and proxy checks, not a controlled benchmark or token billing.",
   "instruction_bytes": {"before": 20462, "after": 7055},
   "evaluation": {"passed": 36, "total": 36, "kind": "historical field observation", "source_category": "anonymized pre-extraction observation", "snapshot": "v0.1.0-extraction"},
-  "current_public_harness": {"passed": 16, "total": 16, "kind": "current local unittest cases; not the historical 36/36 observation"},
+  "current_public_harness": {"passed": 21, "total": 21, "kind": "current local unittest cases; not the historical 36/36 observation"},
   "fresh_process": {"passed": 4, "total": 4},
   "adapters": {"passed": 8, "total": 8},
   "ledger_events": 6,

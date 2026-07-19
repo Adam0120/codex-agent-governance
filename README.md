@@ -4,7 +4,7 @@
 
 <p align="center">A portable, fail-closed control plane for disciplined Codex agent work.</p>
 
-<p align="center"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-2563eb.svg"> <img alt="Experimental version 0.1.1" src="https://img.shields.io/badge/version-0.1.1--experimental-f59e0b.svg"> <img alt="Python 3.11 and 3.12" src="https://img.shields.io/badge/python-3.11%20%7C%203.12-3776ab.svg"></p>
+<p align="center"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-2563eb.svg"> <img alt="Experimental version 0.1.2" src="https://img.shields.io/badge/version-0.1.2--experimental-f59e0b.svg"> <img alt="Python 3.11 and 3.12" src="https://img.shields.io/badge/python-3.11%20%7C%203.12-3776ab.svg"></p>
 
 **[简体中文](README.zh-CN.md)** · **[Changelog](CHANGELOG.md)** · **[中文变更日志](CHANGELOG.zh-CN.md)** · **Unofficial, experimental project** — an independent community project, not an OpenAI product or official policy.
 
@@ -35,6 +35,8 @@ python3 scripts/agent_system.py evaluate --cwd "$PWD"
 Use `install --link` for development, then `rollback --snapshot <path>` to restore the complete pre-install snapshot. A later `install --link` first verifies the old checkout against its recorded manifest, then atomically repoints the Skill to the incoming checkout; modifying the linked checkout after installation fails ownership verification. Locations resolve canonical platform aliases once from `CODEX_HOME` or `~/.codex`, and `$HOME/.agents/skills`; an explicit `HOME` is honored ahead of Windows `USERPROFILE`. The installer rejects links at or below those trusted roots, refuses unmanaged collisions, snapshots Skill/adapters/config, atomically installs, safely merges only managed `[agents]` keys, and never touches MCP config.
 
 The canonical Skill identity and destination are `$govern-agent-system` and `$HOME/.agents/skills/govern-agent-system`, independent of the checkout directory name. Installation, standalone rollback, and direct generation share one contained no-follow lock for their complete write batches. A held or stale crash lock fails closed (`INSTALL_LOCKED`) without managed-state mutation. Exact versioned manifests bind canonical destinations and content hashes; an A→B update validates A against A's own recorded provenance before staging B. Rollback validates and stages every restore before promotion. If automatic recovery cannot be verified, its `recovery_failed` journal fences every managed writer before mutation and is rechecked under the shared lock. Only `rollback --recover --snapshot <journal recovery_snapshot>` may clear the fence. Failed retries retain that original known-good snapshot anchor; success verifies every managed destination against it before clearing the journal.
+
+On POSIX, installer-owned state and snapshot directories are restricted to `0700`, while snapshots, managed configuration, manifests, journals, and the optional controller ledger are restricted to `0600`. `check` is read-only and reports `permission_problems`; a later managed install hardens only validated managed state after acquiring the shared lock and revalidating manifest/snapshot provenance. Permission mutation walks from trusted directory descriptors with no-follow opens, verifies ownership/inode continuity, and rejects hard-linked sensitive files without reading or storing ledger contents. Unsafe or unprovable state fails closed: inspect the reported path without following links, restrict only verified ordinary directories/files, then rerun `check`. Windows retains reparse-point rejection but does not claim equivalent POSIX ACL enforcement.
 
 Generated agent adapters are declarative compatibility mirrors. They do not install MCP or Skills, and they do not grant or deny MCP/Skill permissions; configured host capabilities still depend on Codex/runtime availability and the active sandbox. The Spark locator remains free of mandatory CodeGraph, MCP, and Skill dependencies.
 
@@ -116,7 +118,7 @@ Adapters manage exactly `enabled = true`, `max_threads = 4`, and `max_depth = 1`
 | --- | ---: |
 | Instruction bytes (observed proxy) | 20,462 → 7,055 |
 | Historical field evaluation (observation, not current harness) | 36 / 36 |
-| Current public unittest harness | 16 / 16 |
+| Current public unittest harness | 21 / 21 |
 | Fresh-process checks | 4 / 4 |
 | Deterministic adapters | 8 / 8 |
 | Compact ledger events | 6; 0 sensitive fields |
