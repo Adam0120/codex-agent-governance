@@ -14,7 +14,6 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE = ROOT / "scripts" / "agent_system.py"
 INSTALL = ROOT / "scripts" / "install.py"
 
 def canonical_root(path):
@@ -72,46 +71,10 @@ def release_copy(target, version, marker):
     project.write_text(re.sub(r'version = "[0-9]+\.[0-9]+\.[0-9]+"', f'version = "{version}"', project.read_text()))
     installer = target / "scripts/install.py"
     installer.write_text(re.sub(r'INSTALL_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"', f'INSTALL_VERSION = "{version}"', installer.read_text()))
-    core = target / "scripts/agent_system.py"
-    core.write_text(re.sub(r'RELEASE_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"', f'RELEASE_VERSION = "{version}"', core.read_text()))
-    (target / "release-marker.txt").write_text(marker)
+    skill = target / "SKILL.md"
+    skill.write_text(skill.read_text() + f"\n<!-- release {marker} -->\n")
 
 class GovernanceTests(unittest.TestCase):
-    def test_schema_routing_and_locator_smoke(self):
-        self.assertTrue(json.loads(run(CORE, "evaluate", "--cwd", str(ROOT)).stdout)["ok"])
-        self.assertTrue(json.loads(run(CORE, "locator-smoke").stdout)["ok"])
-        request = json.dumps({"parent_model":"gpt-5.6-sol","parent_reasoning_effort":"high","task_type":"implementation","known_target":False,"factual_uncertainty":[]})
-        self.assertEqual(json.loads(run(CORE, "dispatch", "--cwd", str(ROOT), "--request", request).stdout)["role"], "code_locator")
-        bad = json.dumps({"parent_model":"gpt-5.6-sol","parent_reasoning_effort":"high","task_type":"unknown","known_target":False,"factual_uncertainty":[]})
-        self.assertNotEqual(run(CORE, "dispatch", "--request", bad, ok=False).returncode, 0)
-    def test_generation_privacy_and_portable_paths(self):
-        with tempfile.TemporaryDirectory() as temp:
-            home = Path(temp) / "home"; codex = Path(temp) / "codex"; env = {**os.environ, "HOME":str(home), "CODEX_HOME":str(codex)}
-            first = json.loads(run(CORE, "generate", "--cwd", str(ROOT), env=env).stdout)
-            second = json.loads(run(CORE, "generate", "--cwd", str(ROOT), env=env).stdout)
-            self.assertEqual(first["role_count"], 8); self.assertEqual(second["changed"], [])
-            profile = run(CORE, "profile", "--cwd", str(ROOT), "--role", "code_locator", env=env).stdout
-            self.assertIn("PARTIAL", profile); self.assertIn("English", profile)
-            bad = json.dumps({"task_id":"x","task_hash":"a"*64,"role":"worker","task_type":"x","result_status":"success","failure_class":"none","user_correction_category":"none","user_correction":False,"fallback":"none","config_hash":"a"*64,"prompt":"no"})
-            self.assertNotEqual(run(CORE, "record", "--cwd", str(ROOT), "--event", bad, env=env, ok=False).returncode, 0)
-            for field, value in (("user_correction_category", "prompt\nTool boundary:"), ("tool_counts", {"/tmp/path": 1}), ("tool_counts", {"shell": {"nested": 1}})):
-                event = {"task_id":"x","task_hash":"a"*64,"role":"worker","task_type":"x","result_status":"success","failure_class":"none","user_correction_category":"none","user_correction":False,"fallback":"none","config_hash":"a"*64}
-                event[field] = value
-                self.assertNotEqual(run(CORE, "record", "--cwd", str(ROOT), "--event", json.dumps(event), env=env, ok=False).returncode, 0)
-    def test_locator_first_for_all_unknown_targets_and_adapter_bootstrap(self):
-        for task in ("implementation", "review", "release", "cross_module_contract"):
-            request = json.dumps({"parent_model":"gpt-5.6-sol","parent_reasoning_effort":"high","task_type":task,"known_target":False,"factual_uncertainty":[]})
-            self.assertEqual(json.loads(run(CORE, "dispatch", "--request", request).stdout)["role"], "code_locator")
-        text = (ROOT / ".codex/agents/worker.toml").read_text()
-        self.assertNotIn("<installed-skill>", text); self.assertNotIn("<current cwd>", text); self.assertIn("$govern-agent-system", text); self.assertIn('"$HOME/.agents/skills/govern-agent-system', text)
-        with tempfile.TemporaryDirectory() as temp:
-            home, codex, env = isolated(temp)
-            run(CORE, "generate", "--cwd", str(ROOT), env=env)
-            for adapter in (codex / "agents").glob("*.toml"):
-                generated = adapter.read_text(encoding="utf-8").lower()
-                self.assertNotIn("codegraph", generated); self.assertIn("$govern-agent-system", generated)
-                self.assertIn(f"profile --role {adapter.stem} --cwd .", generated)
-                self.assertIn("does not install mcp or skills and does not grant or deny mcp/skill permissions", generated)
     def test_installer_collision_update_and_rollback(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / "home"; codex = Path(temp) / "codex"; target = home / ".agents" / "skills" / "govern-agent-system"; target.mkdir(parents=True); (target / "foreign").write_text("x")
@@ -135,14 +98,6 @@ class GovernanceTests(unittest.TestCase):
             self.assertIn("INSTALL_LOCKED", locked.stderr); self.assertEqual(before, config.read_bytes())
             lock.unlink(); success = json.loads(run(INSTALL, "install", env={k:v for k,v in env.items() if k != "CAG_FAIL_AFTER_SKILL"}).stdout)
             self.assertTrue(success["ok"]); self.assertFalse(lock.exists()); self.assertTrue(json.loads(run(INSTALL, "install", env={k:v for k,v in env.items() if k != "CAG_FAIL_AFTER_SKILL"}).stdout)["ok"])
-    def test_mechanical_luna_controller_smoke_and_dotted_agents_rejection(self):
-        guards = {k: True for k in ("exact_target_known","expected_output_contract_known","deterministic_verification_available","single_repository_scope","no_material_ambiguity_or_judgment","no_security_auth_secret","no_persistence_migration","no_concurrency_unsafe","no_public_contract_protocol_schema","no_release_deploy_cloud_irreversible","no_incident_root_cause_diagnosis","no_cross_repository_decision","no_semantic_review")}
-        req={"parent_model":"gpt-5.6-sol","parent_reasoning_effort":"high","task_type":"implementation","known_target":True,"factual_uncertainty":[],"mechanical_worker":{**guards,"task_category":"formatting","target":"one-file","deterministic_check":"format-check"}}
-        result=json.loads(run(CORE,"dispatch","--request",json.dumps(req)).stdout); self.assertEqual((result["runtime_variant"],result["model"],result["reasoning_effort"]),("mechanical_luna","gpt-5.6-luna","high")); self.assertIn("Bounded target: one-file",result["assignment"])
-        with tempfile.TemporaryDirectory() as temp:
-            env={**os.environ,"HOME":str(Path(temp)/"home"),"CODEX_HOME":str(Path(temp)/"codex")}; config=Path(temp)/"codex/config.toml"; config.parent.mkdir(parents=True); before=b"agents.max_threads = 9\n"; config.write_bytes(before)
-            self.assertNotEqual(run(CORE,"generate","--cwd",str(ROOT),env=env,ok=False).returncode,0); self.assertEqual(config.read_bytes(),before)
-            self.assertFalse((Path(env["CODEX_HOME"]) / "agents").exists())
     def test_installer_rejects_forged_ownership_and_unsafe_links(self):
         with tempfile.TemporaryDirectory() as temp:
             home, codex, env = isolated(temp); target = home / ".agents/skills/govern-agent-system"
@@ -216,8 +171,6 @@ class GovernanceTests(unittest.TestCase):
             journal = codex / "agent-system/rollback-journal.json"
             original_journal = journal.read_bytes(); self.assertEqual(json.loads(original_journal)["status"], "recovery_failed")
             adapter.write_bytes(b"corrupted pre-retry adapter\n")
-            direct = run(CORE, "generate", "--cwd", str(ROOT), env=env, ok=False)
-            self.assertIn("RECOVERY_REQUIRED", direct.stderr); self.assertEqual(adapter.read_bytes(), b"corrupted pre-retry adapter\n")
             before = state_bytes(home, codex)
             rejected = run(INSTALL, "install", env=env, ok=False)
             self.assertIn("RECOVERY_REQUIRED", rejected.stderr); self.assertFalse((codex / "agent-system/install.lock").exists()); self.assertEqual(state_bytes(home, codex), before)
@@ -238,66 +191,33 @@ class GovernanceTests(unittest.TestCase):
             self.assertTrue(lock.exists())
             journal = codex / "agent-system/rollback-journal.json"
             journal.write_text(json.dumps({"schema_version":1,"identity":"govern-agent-system","operation":"rollback","status":"recovery_failed","recovery_snapshot":installed["snapshot"],"destinations":[],"error":"injected race"}) + "\n")
-            direct = run(CORE, "generate", "--cwd", str(ROOT), env=env, ok=False)
-            self.assertIn("INSTALL_LOCKED", direct.stderr); self.assertEqual(state_bytes(home, codex), before)
             stdout, stderr = process.communicate(timeout=10)
             self.assertNotEqual(process.returncode, 0); self.assertIn("RECOVERY_REQUIRED", stderr); self.assertEqual(state_bytes(home, codex), before)
     def test_trusted_root_alias_acceptance_and_managed_link_rejection(self):
-        spec = util.spec_from_file_location("governance_core_home_test", CORE)
-        module = util.module_from_spec(spec); sys.path.insert(0, str(CORE.parent))
-        try:
-            spec.loader.exec_module(module)
-        finally:
-            sys.path.pop(0)
-        requested = Path("configured-home"); fallback = Path("platform-home")
-        self.assertEqual(module.configured_home({"HOME":str(requested), "USERPROFILE":str(fallback)}, fallback), requested)
-        self.assertEqual(module.configured_home({"USERPROFILE":str(requested)}, fallback), fallback)
         install_spec = util.spec_from_file_location("governance_installer_link_test", INSTALL)
         installer = util.module_from_spec(install_spec); sys.path.insert(0, str(INSTALL.parent))
         try:
             install_spec.loader.exec_module(installer)
         finally:
             sys.path.pop(0)
+        requested = Path("configured-home"); fallback = Path("platform-home")
+        self.assertEqual(installer.configured_home({"HOME":str(requested), "USERPROFILE":str(fallback)}, fallback), requested)
+        self.assertEqual(installer.configured_home({"USERPROFILE":str(requested)}, fallback), fallback)
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / "home"; skill = home / ".agents/skills/govern-agent-system"
             source = Path(temp) / "source"; source.mkdir(); skill.parent.mkdir(parents=True); skill.symlink_to(source, target_is_directory=True)
             self.assertEqual(installer.normalize_windows_link_target(r"\\?\C:/Users/RUNNER~1/AppData/Release"), r"c:\users\runner~1\appdata\release")
             self.assertEqual(installer.normalize_windows_link_target(r"\\?\UNC\Server\Share\Release"), r"\\server\share\release")
             self.assertEqual(installer.normalize_windows_link_target(r"\??\C:\Release\Skill"), r"\??\c:\release\skill")
-            installer.validate_chain(skill, home, allow_final_symlink_to=source)
-            skill.unlink(); alternate = Path(temp) / "alternate"; alternate.symlink_to(source, target_is_directory=True)
-            skill.symlink_to(alternate, target_is_directory=True)
             with self.assertRaises(installer.InstallError):
-                installer.validate_chain(skill, home, allow_final_symlink_to=source)
-            skill.unlink(); alternate.unlink()
-            missing = Path(temp) / "missing"; skill.symlink_to(missing, target_is_directory=True)
-            with self.assertRaises(installer.InstallError):
-                installer.validate_chain(skill, home, allow_final_symlink_to=missing)
+                installer.validate_chain(skill, home)
             skill.unlink()
             fake_reparse = object()
             with mock.patch.object(installer, "lstat_or_none", side_effect=lambda path: fake_reparse if path == skill else None), \
                  mock.patch.object(installer, "is_link_or_reparse", side_effect=lambda info: info is fake_reparse), \
                  mock.patch.object(installer.Path, "is_symlink", return_value=False):
                 with self.assertRaises(installer.InstallError):
-                    installer.validate_chain(skill, home, allow_final_symlink_to=source)
-        with tempfile.TemporaryDirectory() as temp:
-            actual_parent = Path(temp) / "actual-parent"; actual_parent.mkdir()
-            actual_release = actual_parent / "release"; release_copy(actual_release, "0.1.0", "lexical")
-            alias_parent = Path(temp) / "alias-parent"
-            try:
-                alias_parent.symlink_to(actual_parent, target_is_directory=True)
-            except OSError as exc:
-                self.skipTest(f"symlinks unavailable: {exc}")
-            alias_release = alias_parent / "release"; home, codex, env = isolated(Path(temp) / "install")
-            first = json.loads(run(alias_release / "scripts/install.py", "install", "--link", env=env).stdout)
-            manifest = json.loads((codex / "agent-system/managed-install.json").read_text())
-            recorded = str(alias_release.absolute())
-            self.assertEqual(manifest["skill"]["target"], recorded)
-            raw_target = os.readlink(Path(first["installed"]))
-            actual_identity = installer.normalize_windows_link_target(raw_target) if os.name == "nt" else raw_target
-            expected_identity = installer.normalize_windows_link_target(recorded) if os.name == "nt" else recorded
-            self.assertEqual(actual_identity, expected_identity)
-            self.assertTrue(json.loads(run(alias_release / "scripts/install.py", "install", "--link", env=env).stdout)["ok"])
+                    installer.validate_chain(skill, home)
         with tempfile.TemporaryDirectory() as temp:
             actual = Path(temp) / "actual"; actual.mkdir(); alias = Path(temp) / "alias"
             try:
@@ -315,51 +235,25 @@ class GovernanceTests(unittest.TestCase):
             except OSError as exc:
                 self.skipTest(f"symlinks unavailable: {exc}")
             self.assertNotEqual(run(INSTALL, "install", env=env, ok=False).returncode, 0); self.assertEqual(list(outside.iterdir()), [])
-    def test_copy_and_link_updates_validate_recorded_release_provenance(self):
+    def test_copy_updates_validate_recorded_release_provenance(self):
         with tempfile.TemporaryDirectory() as temp:
             release_a = Path(temp) / "release-a"; release_b = Path(temp) / "release-b"
-            release_copy(release_a, "0.1.0", "A"); release_copy(release_b, "0.1.1", "B")
-            for link in (False, True):
-                with self.subTest(link=link):
-                    home = Path(temp) / f"home-{link}"; codex = Path(temp) / f"codex-{link}"
-                    env = {**os.environ, "HOME":str(home), "CODEX_HOME":str(codex)}
-                    args = ("install", "--link") if link else ("install",)
-                    self.assertTrue(json.loads(run(release_a / "scripts/install.py", *args, env=env).stdout)["ok"])
-                    self.assertTrue(json.loads(run(release_b / "scripts/install.py", *args, env=env).stdout)["ok"])
-                    target = home / ".agents/skills/govern-agent-system"
-                    manifest = json.loads((codex / "agent-system/managed-install.json").read_text())
-                    self.assertEqual(manifest["installer_version"], "0.1.1")
-                    if link:
-                        self.assertTrue(target.is_symlink()); self.assertEqual(target.resolve(), release_b.resolve())
-                        converted = json.loads(run(release_b / "scripts/install.py", "install", env=env).stdout)
-                        self.assertTrue(converted["ok"]); self.assertFalse(target.is_symlink()); self.assertEqual((target / "release-marker.txt").read_text(), "B")
-                        self.assertTrue(json.loads(run(release_b / "scripts/install.py", "install", "--link", env=env).stdout)["ok"])
-                        self.assertTrue(target.is_symlink()); self.assertEqual(target.resolve(), release_b.resolve())
-                        target.unlink(); target.symlink_to(release_a, target_is_directory=True)
-                        self.assertNotEqual(run(release_b / "scripts/install.py", "install", "--link", env=env, ok=False).returncode, 0)
-                        target.unlink(); target.symlink_to(Path(temp) / "missing-release", target_is_directory=True)
-                        self.assertNotEqual(run(release_b / "scripts/install.py", "install", "--link", env=env, ok=False).returncode, 0)
-                    else:
-                        self.assertFalse(target.is_symlink()); self.assertEqual((target / "release-marker.txt").read_text(), "B")
-        with tempfile.TemporaryDirectory() as temp:
-            legacy = Path(temp) / "v0.1.0"; release_copy(legacy, "0.1.0", "legacy")
+            release_copy(release_a, "0.2.0", "A"); release_copy(release_b, "0.2.1", "B")
             home, codex, env = isolated(temp)
-            linked = json.loads(run(legacy / "scripts/install.py", "install", "--link", env=env).stdout)
+            first = json.loads(run(release_a / "scripts/install.py", "install", env=env).stdout)
+            before = state_bytes(home, codex)
+            updated = json.loads(run(release_b / "scripts/install.py", "install", env=env).stdout)
             target = home / ".agents/skills/govern-agent-system"
-            self.assertTrue(linked["ok"] and target.is_symlink() and target.resolve() == legacy.resolve())
-            converted = json.loads(run(INSTALL, "install", env=env).stdout)
             manifest = json.loads((codex / "agent-system/managed-install.json").read_text())
-            self.assertTrue(converted["ok"]); self.assertFalse(target.is_symlink()); self.assertTrue(target.is_dir())
-            self.assertEqual((manifest["installer_version"], manifest["link"], manifest["skill"]["target"]), ("0.1.2", False, None))
-            restored = json.loads(run(INSTALL, "rollback", "--snapshot", converted["snapshot"], env=env).stdout)
-            legacy_manifest = json.loads((codex / "agent-system/managed-install.json").read_text())
-            self.assertTrue(restored["ok"]); self.assertTrue(target.is_symlink()); self.assertEqual(target.resolve(), legacy.resolve())
-            self.assertEqual((legacy_manifest["installer_version"], legacy_manifest["link"]), ("0.1.0", True))
-            self.assertTrue(json.loads(run(legacy / "scripts/install.py", "install", "--link", env=env).stdout)["ok"])
+            self.assertTrue(first["ok"] and updated["ok"])
+            self.assertEqual(manifest["installer_version"], "0.2.1")
+            self.assertIn("release B", (target / "SKILL.md").read_text())
+            self.assertTrue(json.loads(run(release_b / "scripts/install.py", "rollback", "--snapshot", updated["snapshot"], env=env).stdout)["ok"])
+            self.assertEqual(state_bytes(home, codex), before)
     def test_isolated_install_update_and_rollback_leave_mcp_untouched(self):
         with tempfile.TemporaryDirectory() as temp:
             release_a, release_b = Path(temp) / "release-a", Path(temp) / "release-b"
-            release_copy(release_a, "0.1.0", "A"); release_copy(release_b, "0.1.1", "B")
+            release_copy(release_a, "0.2.0", "A"); release_copy(release_b, "0.2.1", "B")
             home, codex, env = isolated(temp); codex.mkdir(parents=True)
             mcp_config = codex / "mcp.toml"; before = b"[mcp]\nendpoint = 'unchanged'\n"; mcp_config.write_bytes(before)
             first = json.loads(run(release_a / "scripts/install.py", "install", env=env).stdout)
@@ -491,24 +385,23 @@ class GovernanceTests(unittest.TestCase):
             self.assertTrue(private_mode(root / "managed-opened/secret", 0o600))
             self.assertEqual(outside_target.read_bytes(), b"outside\n")
             self.assertEqual(stat.S_IMODE(outside_target.lstat().st_mode), 0o644)
-    def test_config_order_audit_and_canonical_skill_identity(self):
+    def test_config_order_and_canonical_skill_identity(self):
         rendered = []
         for seed in ("1", "2", "3", "4"):
             with tempfile.TemporaryDirectory() as temp:
                 home, codex, env = isolated(temp); config = codex / "config.toml"; config.parent.mkdir(parents=True); config.write_text('[agents]\nfuture_key = "keep"\ninterrupt_message = false\n')
-                run(CORE, "generate", "--cwd", str(ROOT), env={**env, "PYTHONHASHSEED":seed})
-                rendered.append(config.read_bytes()); self.assertTrue(json.loads(run(CORE, "audit", "--cwd", str(ROOT), env=env).stdout)["ok"])
-                self.assertEqual(tomllib.loads(config.read_text())["agents"], {"future_key":"keep", "interrupt_message":False, "enabled":True, "max_depth":1, "max_threads":4})
+                self.assertTrue(json.loads(run(INSTALL, "install", env={**env, "PYTHONHASHSEED":seed}).stdout)["ok"])
+                rendered.append(config.read_bytes())
+                self.assertEqual(tomllib.loads(config.read_text())["agents"], {"future_key":"keep", "interrupt_message":False, "max_depth":1, "max_threads":4})
         self.assertEqual(len(set(rendered)), 1)
         frontmatter = (ROOT / "SKILL.md").read_text().split("---", 2)[1]
         self.assertIn("\nname: govern-agent-system\n", "\n" + frontmatter)
         self.assertIn("$govern-agent-system", (ROOT / "agents/openai.yaml").read_text())
         with tempfile.TemporaryDirectory() as temp:
             home, codex, env = isolated(temp); result = json.loads(run(INSTALL, "install", env=env).stdout)
-            installed = home / ".agents/skills/govern-agent-system/scripts/agent_system.py"
-            self.assertIn("Role: worker", run(installed, "profile", "--cwd", str(ROOT), "--role", "worker", env=env).stdout)
-            dispatch = json.loads(run(installed, "dispatch", "--request", json.dumps({"parent_model":"gpt-5.6-sol","parent_reasoning_effort":"high","task_type":"implementation","known_target":True,"factual_uncertainty":[]}), env=env).stdout)
-            self.assertIn('python3 "$HOME/.agents/skills/govern-agent-system', dispatch["assignment"]); self.assertTrue(result["ok"])
+            installed = home / ".agents/skills/govern-agent-system"
+            self.assertEqual([path.name for path in installed.iterdir()], ["SKILL.md"])
+            self.assertTrue(result["ok"])
         with tempfile.TemporaryDirectory() as temp:
             renamed = Path(temp) / "renamed governance checkout"
             shutil.copytree(ROOT, renamed, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "build", "dist"))
@@ -517,23 +410,19 @@ class GovernanceTests(unittest.TestCase):
             result = json.loads(run(renamed / "scripts/install.py", "install", env=env).stdout)
             installed = canonical_root(home) / ".agents/skills/govern-agent-system"
             self.assertEqual(Path(result["installed"]), installed)
-            assignment = json.loads(run(installed / "scripts/agent_system.py", "dispatch", "--cwd", str(renamed), "--request", json.dumps({"parent_model":"gpt-5.6-sol","parent_reasoning_effort":"high","task_type":"implementation","known_target":True,"factual_uncertainty":[]}), env=env).stdout)["assignment"]
-            self.assertIn('python3 "$HOME/.agents/skills/govern-agent-system/scripts/agent_system.py"', assignment)
+            self.assertEqual([path.name for path in installed.iterdir()], ["SKILL.md"])
     def test_release_version_diagnostics_are_consistent(self):
         expected = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
         self.assertEqual(run(INSTALL, "--version").stdout.strip(), expected)
-        self.assertEqual(run(CORE, "--version").stdout.strip(), expected)
         with tempfile.TemporaryDirectory() as temp:
             home, codex, env = isolated(temp)
             self.assertEqual(json.loads(run(INSTALL, "check", env=env).stdout)["release_version"], expected)
-            run(CORE, "generate", "--cwd", str(ROOT), env=env)
-            for command in ("audit", "evaluate", "verify"):
-                self.assertEqual(json.loads(run(CORE, command, "--cwd", str(ROOT), env=env).stdout)["release_version"], expected)
-    def test_chart_determinism_and_public_scan(self):
-        run(ROOT / "scripts" / "render_charts.py")
-        before = (ROOT / "docs/assets/instruction-bytes.svg").read_bytes(); run(ROOT / "scripts" / "render_charts.py")
-        self.assertEqual(before, (ROOT / "docs/assets/instruction-bytes.svg").read_bytes())
-        text = "\n".join(p.read_text(encoding="utf-8") for p in (ROOT / "references").rglob("*") if p.is_file())
-        self.assertNotIn("rootkey.csv", text.lower())
+    def test_public_runtime_has_no_controller_interface(self):
+        self.assertFalse((ROOT / "scripts/agent_system.py").exists())
+        runtime = (ROOT / "SKILL.md").read_text(encoding="utf-8") + "\n".join(
+            path.read_text(encoding="utf-8") for path in (ROOT / ".codex/agents").glob("*.toml")
+        )
+        self.assertNotIn("agent_system.py", runtime)
+        self.assertNotIn("mechanical_luna", runtime)
 
 if __name__ == "__main__": unittest.main()

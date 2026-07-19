@@ -1,91 +1,103 @@
-<p align="center"><img src="docs/assets/hero-control-plane.png" alt="带有受保护路径的抽象代理控制平面" width="860"></p>
-
 # Govern Agent System
 
-一个可移植、默认拒绝的 Codex 代理协作控制平面。
+实验性 v0.2.0 提供一个精简 Codex Skill 与八个自包含自定义代理，通过 Codex 原生能力进行委派。日常运行不再需要 Python 治理控制器、请求 JSON、生成 profile、复用令牌、ledger 写入、项目 overlay 或强制 MCP 步骤。
 
-**[English](README.md)** · **[English changelog](CHANGELOG.md)** · **[中文变更日志](CHANGELOG.zh-CN.md)** · **非官方实验性项目**：独立社区项目，并非 OpenAI 产品或官方政策。即使发布视觉图片无法加载，文档和命令仍然可用。
+## 为什么 v0.2 更简单
 
-它通过八角色目录、确定性分派、英文子代理契约、生成式适配器、隐私受限账本和可恢复安装来约束协作；核心不要求 MCP 或 CodeGraph。
+Codex 已能选择并启动注册代理。v0.2 把策略直接放在消费位置：
 
-## 核心解决的问题
-
-无治理的协作会在每次交接时反复读取业务文件、重新推断范围、顺序与风险。本项目让能力较强的 parent/Sol 保留这些高上下文职责：范围、冻结契约、编排顺序和高风险决策；Spark 负责 revision/path/line/status 的事实定位；Terra 实现已经冻结的切片；Sol 专家负责架构、安全、审查和发布。可选的受限 Luna 变体只处理精确、确定性的转换，绝不负责规划。
-
-| 反复推理流程 | 受治理流程 |
-| --- | --- |
-| 每次交接重新发现文件、归属与意图 | 向一个权限有界角色分派冻结契约 |
-| 传递大段上下文并重新规划 | 复用 `reuse_key`，按需渐进加载 profile，返回紧凑证据 |
-| 小模型必须自行推断业务意图 | 提供窄而已冻结的契约和确定性检查；不足时默认拒绝并升级 |
-
-其设计意图是减少重复发现与上下文传递，并以此机制预期改善开发吞吐、通过窄契约弥补较小模型规划能力较弱的问题。观察到的 20,462 → 7,055 指令字节只是上下文占用代理，**不是** token 或账单证明、不是已测得的吞吐结果、不是质量取舍、也不是受控 benchmark。默认拒绝路由和升级机制旨在保住质量边界，而非越过它们。
-
-## 快速开始
-
-```bash
-git clone https://github.com/Adam0120/codex-agent-governance.git
-cd codex-agent-governance
-python3 scripts/install.py install
-python3 scripts/agent_system.py evaluate --cwd "$PWD"
-```
-
-先运行 `python3 scripts/install.py check`；开发链接安装使用 `python3 scripts/install.py install --link`；再次链接安装会先按旧清单验证旧 checkout，再原子切换到新 checkout，安装后修改旧 checkout 会导致所有权验证失败。使用 `python3 scripts/install.py rollback --snapshot <snapshot>` 恢复安装前完整快照。
-
-位置从 `CODEX_HOME` 或 `~/.codex` 和 `$HOME/.agents/skills` 解析。安装器拒绝未受管理冲突，完整快照 Skill/适配器/配置，原子安装，仅安全合并 `[agents]` 受管理键，绝不修改 MCP 配置。
-
-在 POSIX 上，安装器拥有的状态和快照目录会限制为 `0700`，快照、受管理配置、清单、journal 和可选控制器 ledger 会限制为 `0600`。`check` 只读并报告 `permission_problems`；后续受管理安装取得共享锁并重新验证清单/快照来源后，才加固已验证的受管理状态。权限变更从可信目录描述符开始、逐级禁止跟随链接，并验证所有权与 inode 连续性；敏感硬链接会被拒绝，ledger 内容不会被读取或保存。状态不安全或无法证明归属时会默认拒绝：不要跟随链接，先检查报告路径，仅限制已验证的普通目录/文件，然后重新运行 `check`。Windows 保留 reparse point 拒绝，但不声称提供等价的 POSIX ACL 保证。
-
-规范 Skill 身份与目标固定为 `$govern-agent-system` 和 `$HOME/.agents/skills/govern-agent-system`，不依赖 checkout 目录名。HOME 与 CODEX_HOME 的平台别名只规范化一次，并拒绝可信根及其下方的链接或 reparse point。安装、独立回滚和直接生成在完整写入批次内共用一个受限、禁止跟随链接的锁；已有或崩溃遗留的锁会以 `INSTALL_LOCKED` 默认拒绝且不修改受管状态。精确版本清单绑定规范目标和内容哈希；A→B 更新先按 A 自己记录的来源验证 A，再暂存 B。若自动恢复无法验证，`recovery_failed` journal 会阻止所有受管写入，并在取得共享锁后再次检查。只有 `rollback --recover --snapshot <journal 中的 recovery_snapshot>` 才能解除；失败重试始终保留最初的已知良好快照锚点，成功时会按该锚点验证全部受管目标后才清除 journal。
-
-## 架构、路由与安全
+- `SKILL.md` 为高能力主代理提供高自由度的选角与交接指导。
+- `.codex/agents/*.toml` 直接打包八个固定角色，并自包含执行、工具、升级、模型、推理强度和 sandbox 契约。
+- 项目事实放入各项目的 `AGENTS.md`。
+- 安装与回滚复杂度仅属于维护边界，不进入运行时提示词热路径。
 
 ```mermaid
 flowchart LR
-  P[合格父代理] --> G{父级门禁}
-  G -->|通过| D[默认拒绝分派]
-  G -->|失败| X[不分派]
-  D --> C[(角色语义目录)]
-  D --> R[(运行时 profile<br/>openai-gpt-5.6-balanced)]
-  D --> O[仅数据 Overlay]
-  D --> A[生成适配器]
+  U[用户任务] --> M[主代理]
+  M -->|委派无实质收益| W[直接处理]
+  M -->|适合有边界的专家| R[最小合适角色]
+  R --> E[精简英文证据]
+  E --> M
+  I[一次性安装器] -. 复制 Skill 与 8 个 TOML .-> M
 ```
 
-```mermaid
-stateDiagram-v2
-  [*] --> 验证父级
-  验证父级 --> 拒绝: 门禁失败
-  验证父级 --> 验证事实
-  验证事实 --> 定位器: 查询/目标未知/不确定
-  验证事实 --> 唯一角色: 已知归属
-  定位器 --> 证据: revision + Item + PARTIAL
-  唯一角色 --> 严格机械工人: 所有门禁为真
-  唯一角色 --> 标准角色
-  严格机械工人 --> 证据
-  标准角色 --> 证据
+## 角色矩阵
+
+| 角色 | 模型 | 推理强度 | Sandbox | 用途 |
+|---|---|---|---|---|
+| `default` | `gpt-5.6-terra` | high | read-only | 显式通用只读建议兜底 |
+| `worker` | `gpt-5.6-terra` | high | workspace-write | 已确定的实现切片 |
+| `explorer` | `gpt-5.6-terra` | high | read-only | 有边界的发现或排障 |
+| `code_locator` | `gpt-5.3-codex-spark` | high | read-only | 感知版本的事实位置 |
+| `cross_module_architect` | `gpt-5.6-sol` | high | read-only | 跨模块契约与迁移设计 |
+| `systems_safety` | `gpt-5.6-sol` | high | workspace-write | 并发、生命周期、密码学、授权、持久化 |
+| `semantic_reviewer` | `gpt-5.6-sol` | high | read-only | 最终语义与安全审查 |
+| `release_operator` | `gpt-5.6-sol` | high | workspace-write | 已授权且绑定版本的发布工作 |
+
+v0.1 中仅用于 dispatch、未验证的 `mechanical_luna` 变体已移除；它从来不是第九个角色。
+
+## 快速开始
+
+先只读检查，再安装；之后重启 Codex 以重新加载自定义代理注册表：
+
+```bash
+python3 scripts/install.py check
+python3 scripts/install.py install
 ```
 
-`code_locator` 仅使用 Git、优先 `rg`（否则受限标准库回退）、路径/权限检查和有限读取。CodeGraph 仅可作为非阻塞可选增强。Overlay 只能提供身份/base hash、定位器清单和字面限定符、证据目录、兼容镜像标志，不能改变角色、模型、沙箱、工具、深度或策略。
+安装器只把 `SKILL.md` 复制到 `$HOME/.agents/skills/govern-agent-system/`，把恰好八个打包 TOML 复制到 `${CODEX_HOME:-$HOME/.codex}/agents/`，并且只安全合并以下受支持的全局配置：
 
-| 角色 | 权限边界 | 默认映射 |
-| --- | --- | --- |
-| `default` | 只读咨询兜底 | Terra / high / read-only |
-| `worker` | 已冻结独立实现 | Terra / high / workspace-write |
-| `explorer` | 有界发现/排障 | Terra / high / read-only |
-| `code_locator` | 带 revision 的事实定位 | Spark / high / read-only |
-| `cross_module_architect` | 跨模块冻结决策 | Sol / high / read-only |
-| `systems_safety` | 并发/生命周期/密码/持久状态 | Sol / high / workspace-write |
-| `semantic_reviewer` | 最终语义/安全审查 | Sol / high / read-only |
-| `release_operator` | 已批准 revision 激活 | Sol / high / workspace-write |
+```toml
+[agents]
+max_threads = 4
+max_depth = 1
+```
 
-子代理必须使用英文并给出紧凑最终证据，且禁止再派生子代理；生成适配器只管理 `enabled = true`、`max_threads = 4` 与 `max_depth = 1`，保留其他 `[agents]` 键。生成适配器是声明式兼容镜像：不安装 MCP/Skill，也不显式授予或拒绝 MCP/Skill 权限；宿主已配置的能力仍受 Codex/运行时可用性和当前沙箱约束。Spark 定位器不依赖必需的 CodeGraph、MCP 或 Skill。记录 schema 会拒绝 source、prompt、path、log、credential 等敏感字段。
+`~/.codex/agents/` 下的独立自定义代理 TOML 会被原生发现，不需要 `config_file` 声明。受支持的 `[agents]` 表包含 `max_threads`、`max_depth`、`job_max_runtime_seconds` 和 `interrupt_message` 等设置，并不存在 `enabled` 开关。参见当前 [Codex Subagents 文档](https://developers.openai.com/codex/subagents/)。
 
-## 观察代理，不是 token 计费
+其他 Codex 配置（包括不相关且受支持的 `[agents]` 键与 MCP 配置）保持不变。调用 `$govern-agent-system` 后，主代理判断委派是否有实质收益、选择最小角色、发送精简英文任务，并在相同工作面后续中按 agent id 复用同一子代理。拒绝或安全门失败意味着 `STOP`，不是扩大范围或提升权限的理由。
 
-<p align="center"><img src="docs/assets/instruction-bytes.svg" alt="观察代理：指令字节 20,462 到 7,055；不是 token 计费" width="760"></p>
-<p align="center"><img src="docs/assets/observed-starts.svg" alt="按类别的观察代理启动数据；不是 token 计费" width="760"></p>
+## 安全更新与回滚
 
-匿名 [观察数据](benchmarks/observations.json)：指令字节代理 20,462 → 7,055；历史现场观察评估 36/36（不是当前公开 harness）；当前公开 unittest 为 21/21；全新进程 4/4；适配器 8/8；六个账本事件、零敏感字段。生成的 `mechanical_luna` 受限变体要求运行时模型可用；本机隔离 CLI 探测在 API 认证阶段停止，未完成 Luna 实机验证或成功 smoke。定位器契约修正在盲测首响应之前完成。这些是观察/代理，不是受控 benchmark，也不是 token 计费。
+每次安装都会创建私有快照并返回路径。恢复命令：
 
-## 测试与贡献
+```bash
+python3 scripts/install.py rollback --snapshot <snapshot-path>
+```
 
-运行 `python3 -m unittest discover -s tests -v`、`python3 scripts/agent_system.py locator-smoke`、`python3 scripts/render_charts.py`。CI 覆盖 Ubuntu、macOS、Windows 与 Python 3.11/3.12。可选集成为 opt-in 且不阻塞。贡献请读 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题请按 [SECURITY.md](SECURITY.md) 私下报告；不要提交私有路径、凭据、用户内容、转录或部署状态。
+纯标准库安装器使用受限且禁止跟随链接的锁、冲突检查、内容绑定清单、完整安装前快照、分阶段原子替换、恢复隔离和精确目标回滚。未知受管状态、symlink/reparse point、敏感硬链接、畸形清单、歧义的 dotted `[agents]` 键以及已变更的受管内容都会默认拒绝。在 POSIX 上，状态/快照目录限制为 `0700`，敏感文件为 `0600`。`check` 只读。安装、检查和回滚均不修改 MCP 配置。
+
+已发布且受管的 v0.1.0、v0.1.1 与 v0.1.2 复制或链接安装，在验证其记录来源后可更新至 v0.2.0。更新会替换受管 Skill 和八个适配器，从已安装 Skill 中移除控制器/目录产物，并且只从真实 `[agents]` 表删除旧安装器拥有的 `enabled = true`。非代理配置、不相关且受支持的 `[agents]` 键、MCP 设置和受管目标外的未知用户文件都会保留；旧 `ledger.jsonl` 字节仍作为惰性数据原样保留。未知版本、无法证明来源或位置有歧义的 `agents.enabled` 会默认拒绝。v0.2 运行时不会将 ledger 作为遥测读取或写入。更新快照会逐字节恢复旧配置，包括 `enabled = true`；旧链接 Skill 仅作为验证后的迁移输入被接受，因为 v0.2 已不再提供 `install --link`。
+
+如果无法验证恢复结果，所有受管写入都会继续被隔离。只能使用安装器报告的精确恢复命令与快照，不要手工删除 journal。
+
+## 运行时与维护边界
+
+运行时载荷：
+
+- 一个精简 `SKILL.md`；
+- 八个规范、可解析、自包含的自定义代理 TOML；
+- 不依赖控制器、生成器、overlay、遥测或 MCP。
+
+维护面：
+
+- `scripts/install.py` 与 `scripts/managed_lock.py` 提供 check/install/rollback；
+- 测试覆盖迁移、回滚、冲突、恢复、锁、权限、链接/reparse point、硬链接、配置合并和静态运行时契约；
+- 公共文档与版本元数据。
+
+代码定位器可仅依赖 Git、可用时的 `rg`、有边界的标准库回退与行号复核。CodeGraph 或其他 MCP 索引是可选、非阻塞能力。适配器可以在相关且宿主已提供时使用 Skill 或 MCP，但既不安装也不要求它们。
+
+## 实验性兼容与证据限制
+
+v0.2.0 面向当前 Codex 自定义代理 TOML 字段，以及由 Sol/Terra high 或更高推理强度主代理执行的原生代理启动。这些接口可能变化。请先在隔离的 `HOME`/`CODEX_HOME` 中验证，保留安装返回的快照，并在安装后重启 Codex。
+
+本地测试覆盖受支持 Python 版本与 CI 操作系统上的确定性文件系统和配置行为，但不能证明模型质量、成本下降、完成速度提升、CodeGraph 可用性、生产发布安全或真实多代理效果更优。本项目没有受控现场研究或生产部署结论。
+
+## 开发
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m compileall -q scripts tests
+```
+
+项目仅使用 Python 标准库。参见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SECURITY.md](SECURITY.md)。

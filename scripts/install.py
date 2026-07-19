@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install, inspect, snapshot, or roll back govern-agent-system without MCP changes."""
+"""Safely install, inspect, snapshot, or roll back govern-agent-system."""
 from __future__ import annotations
 
 import argparse
@@ -16,20 +16,37 @@ import tomllib
 import uuid
 import re
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
-import agent_system as core
 import managed_lock
 
 SOURCE = Path(os.path.abspath(__file__)).parents[1]
 IDENTITY = "govern-agent-system"
-INSTALL_VERSION = "0.1.2"
+INSTALL_VERSION = "0.2.0"
 MANIFEST_SCHEMA = 1
 SNAPSHOT_SCHEMA = 2
-ROLE_NAMES = tuple(sorted(core.catalog()[0]))
+ROLE_RUNTIME = {
+    "default": ("gpt-5.6-terra", "high", "read-only"),
+    "worker": ("gpt-5.6-terra", "high", "workspace-write"),
+    "explorer": ("gpt-5.6-terra", "high", "read-only"),
+    "code_locator": ("gpt-5.3-codex-spark", "high", "read-only"),
+    "cross_module_architect": ("gpt-5.6-sol", "high", "read-only"),
+    "systems_safety": ("gpt-5.6-sol", "high", "workspace-write"),
+    "semantic_reviewer": ("gpt-5.6-sol", "high", "read-only"),
+    "release_operator": ("gpt-5.6-sol", "high", "workspace-write"),
+}
+ROLE_NAMES = tuple(sorted(ROLE_RUNTIME))
+SKILL_SOURCE = SOURCE / "SKILL.md"
+ADAPTER_SOURCE = SOURCE / ".codex" / "agents"
+CONFIG_KEY_ORDER = ("max_threads", "max_depth")
+MANAGED_AGENTS = {"max_threads": 4, "max_depth": 1}
+LEGACY_MANAGED_AGENTS = {"enabled": True, "max_depth": 1, "max_threads": 4}
+LEGACY_INSTALL_VERSIONS = frozenset({"0.1.0", "0.1.1", "0.1.2"})
 SOURCE_IGNORED_PARTS = {".git", "__pycache__", ".pytest_cache", "build", "dist"}
 RUNTIME_IGNORED_PARTS = {"__pycache__", ".pytest_cache"}
-SHA256 = core.SHA256
+SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+SHA256 = re.compile(r"^[a-f0-9]{64}$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 SNAPSHOT_NAME = re.compile(r"^snapshot-[a-f0-9]{32}$")
 
@@ -263,8 +280,14 @@ def trusted_root(raw: Path) -> Path:
     return root
 
 
+def configured_home(environ: Mapping[str, str] | None = None, fallback: Path | None = None) -> Path:
+    source = os.environ if environ is None else environ
+    raw = source.get("HOME")
+    return Path(raw) if raw else (Path.home() if fallback is None else fallback)
+
+
 def paths() -> dict[str, Path]:
-    home = trusted_root(core.configured_home())
+    home = trusted_root(configured_home())
     codex = trusted_root(Path(os.environ.get("CODEX_HOME", str(home / ".codex"))))
     state = codex / "agent-system"
     skills = home / ".agents" / "skills"
@@ -476,10 +499,19 @@ def validate_manifest_document(document: Any, p: dict[str, Path], *, verify_cont
         if record["path"] != str(p["agents"] / f"{name}.toml") or not isinstance(record["sha256"], str) or not SHA256.fullmatch(record["sha256"]):
             raise InstallError(f"invalid managed adapter record: {name}")
     config = exact_keys(manifest["config"], {"path", "managed", "managed_sha256"}, "manifest config")
-    if config["path"] != str(p["config"]) or not isinstance(config["managed"], dict) or not config["managed"] or any(not isinstance(key, str) or not core.SAFE_ID.fullmatch(key) for key in config["managed"]):
+    if config["path"] != str(p["config"]) or not isinstance(config["managed"], dict) or not config["managed"] or any(not isinstance(key, str) or not SAFE_ID.fullmatch(key) for key in config["managed"]):
         raise InstallError("invalid managed config record")
     if not isinstance(config["managed_sha256"], str) or not SHA256.fullmatch(config["managed_sha256"]) or config["managed_sha256"] != managed_config_hash(config["managed"]):
         raise InstallError("invalid managed config hash")
+    version = tuple(int(part) for part in manifest["installer_version"].split("."))
+    if manifest["installer_version"] in LEGACY_INSTALL_VERSIONS:
+        expected_managed = LEGACY_MANAGED_AGENTS
+    elif version >= (0, 2, 0):
+        expected_managed = MANAGED_AGENTS
+    else:
+        raise InstallError("unsupported managed installer version")
+    if config["managed"] != expected_managed:
+        raise InstallError("managed config provenance does not match installer version")
     if not verify_content:
         return manifest
     if manifest["link"]:
@@ -519,16 +551,178 @@ def load_managed_manifest(p: dict[str, Path], *, verify_content: bool = True) ->
     return validate_manifest_document(document, p, verify_content=verify_content)
 
 
-def build_generation_plan(p: dict[str, Path]) -> tuple[dict[str, Any], list[tuple[Path, str]]]:
-    validate_destinations(p, skip_skill_final=True)
+def packaged_file(path: Path) -> bytes:
     try:
-        metadata, writes = core.generation_plan(Path.cwd())
-    except ValueError as exc:
-        raise InstallError(str(exc)) from exc
-    expected = {p["agents"] / f"{name}.toml" for name in ROLE_NAMES} | {p["config"]}
-    if {canonical(path) for path, _ in writes} != expected:
-        raise InstallError("generation plan has unexpected destinations")
-    return metadata, [(canonical(path), content) for path, content in writes]
+        fd = os.open(path, _descriptor_flags())
+    except OSError as exc:
+        raise InstallError(f"cannot open packaged runtime file: {path}: {exc}") from exc
+    try:
+        info = os.fstat(fd)
+        visible = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or is_link_or_reparse(visible)
+            or (visible.st_dev, visible.st_ino) != (info.st_dev, info.st_ino)
+        ):
+            raise InstallError(f"unsafe packaged runtime file: {path}")
+        return _descriptor_bytes(fd)
+    except OSError as exc:
+        raise InstallError(f"cannot read packaged runtime file: {path}: {exc}") from exc
+    finally:
+        os.close(fd)
+
+
+def packaged_adapters() -> dict[str, str]:
+    info = lstat_or_none(ADAPTER_SOURCE)
+    if info is None or is_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
+        raise InstallError("packaged adapter directory is unsafe or missing")
+    actual = {path.name for path in ADAPTER_SOURCE.iterdir()}
+    expected = {f"{name}.toml" for name in ROLE_NAMES}
+    if actual != expected:
+        raise InstallError("packaged adapter set must contain exactly eight role TOMLs")
+    result: dict[str, str] = {}
+    for name in ROLE_NAMES:
+        raw = packaged_file(ADAPTER_SOURCE / f"{name}.toml")
+        try:
+            text = raw.decode("utf-8")
+            document = tomllib.loads(text)
+        except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+            raise InstallError(f"invalid packaged adapter: {name}: {exc}") from exc
+        document = exact_keys(
+            document,
+            {"name", "description", "model", "model_reasoning_effort", "sandbox_mode", "developer_instructions"},
+            f"packaged adapter {name}",
+        )
+        expected_runtime = ROLE_RUNTIME[name]
+        actual_runtime = (document["model"], document["model_reasoning_effort"], document["sandbox_mode"])
+        if (
+            document["name"] != name
+            or actual_runtime != expected_runtime
+            or not isinstance(document["description"], str)
+            or not document["description"]
+            or not isinstance(document["developer_instructions"], str)
+            or not document["developer_instructions"]
+        ):
+            raise InstallError(f"packaged adapter contract mismatch: {name}")
+        result[name] = text
+    return result
+
+
+def reject_multiline_toml_strings(original: str) -> None:
+    """Fail closed before line-based mutation can misread string content as TOML structure."""
+    state = "bare"
+    index = 0
+    while index < len(original):
+        char = original[index]
+        if state == "bare":
+            if char == "#":
+                newline = original.find("\n", index)
+                index = len(original) if newline < 0 else newline + 1
+                continue
+            if char == '"':
+                if original.startswith('"""', index):
+                    raise InstallError("multiline TOML strings are unsupported for safe [agents] merge")
+                state = "basic"
+            elif char == "'":
+                if original.startswith("'''", index):
+                    raise InstallError("multiline TOML strings are unsupported for safe [agents] merge")
+                state = "literal"
+        elif state == "basic":
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                state = "bare"
+        elif char == "'":
+            state = "bare"
+        index += 1
+
+
+def render_agents_config(original: str, *, remove_legacy_enabled: bool) -> str:
+    try:
+        parsed = tomllib.loads(original) if original else {}
+    except tomllib.TOMLDecodeError as exc:
+        raise InstallError(f"invalid TOML before mutation: {exc}") from exc
+    if not isinstance(parsed, dict) or ("agents" in parsed and not isinstance(parsed["agents"], dict)):
+        raise InstallError("agents configuration must be a table")
+    agents = parsed.get("agents", {})
+    has_enabled = "enabled" in agents
+    if has_enabled and not remove_legacy_enabled:
+        raise InstallError("unmanaged [agents].enabled is unsupported; refusing to delete it")
+    if remove_legacy_enabled and (not has_enabled or agents.get("enabled") is not True):
+        raise InstallError("legacy [agents].enabled provenance or value is ambiguous")
+    reject_multiline_toml_strings(original)
+    if re.search(r'''(?m)^\s*(?:agents|"agents"|'agents')\s*\.''', original):
+        raise InstallError("unsupported dotted agents keys; refuse ambiguous merge")
+    values = {
+        key: str(MANAGED_AGENTS[key]).lower() if isinstance(MANAGED_AGENTS[key], bool) else str(MANAGED_AGENTS[key])
+        for key in CONFIG_KEY_ORDER
+    }
+    lines = original.splitlines(keepends=True)
+    out: list[str] = []
+    in_agents = False
+    found_agents = False
+    removed_legacy_enabled = 0
+
+    def append_managed() -> None:
+        if out and not out[-1].endswith(("\n", "\r")):
+            out.append("\n")
+        for key in CONFIG_KEY_ORDER:
+            out.append(f"{key} = {values[key]}\n")
+
+    for line in lines:
+        table = re.match(r"^\s*\[([^]]+)\]\s*(?:#.*)?$", line)
+        if table:
+            if in_agents:
+                append_managed()
+            in_agents = table.group(1).strip() == "agents"
+            found_agents |= in_agents
+            out.append(line)
+            continue
+        if in_agents and re.match(r"^\s*enabled\s*=", line):
+            if not remove_legacy_enabled:
+                raise InstallError("unmanaged [agents].enabled is unsupported; refusing to delete it")
+            removed_legacy_enabled += 1
+            continue
+        if not (in_agents and re.match(r"^\s*(max_depth|max_threads)\s*=", line)):
+            out.append(line)
+    if remove_legacy_enabled and removed_legacy_enabled != 1:
+        raise InstallError("legacy [agents].enabled table location is ambiguous")
+    if in_agents:
+        append_managed()
+    elif not found_agents:
+        if not original:
+            out = ["[agents]\n"]
+        else:
+            if not original.endswith("\n"):
+                out.append("\n")
+            out += ["\n[agents]\n"]
+        append_managed()
+    rendered = "".join(out)
+    try:
+        tomllib.loads(rendered)
+    except tomllib.TOMLDecodeError as exc:
+        raise InstallError(f"invalid staged TOML: {exc}") from exc
+    return rendered
+
+
+def build_install_plan(p: dict[str, Path]) -> tuple[dict[str, Any], list[tuple[Path, str]]]:
+    validate_destinations(p, skip_skill_final=True)
+    manifest = load_managed_manifest(p)
+    remove_legacy_enabled = bool(
+        manifest is not None
+        and manifest["installer_version"] in LEGACY_INSTALL_VERSIONS
+    )
+    try:
+        original = p["config"].read_text(encoding="utf-8") if p["config"].exists() else ""
+    except (OSError, UnicodeError) as exc:
+        raise InstallError(f"cannot read Codex config: {exc}") from exc
+    adapters = packaged_adapters()
+    writes = [(p["agents"] / f"{name}.toml", adapters[name]) for name in ROLE_NAMES]
+    writes.append((p["config"], render_agents_config(original, remove_legacy_enabled=remove_legacy_enabled)))
+    migration = "remove_legacy_agents_enabled" if remove_legacy_enabled else "none"
+    return {"role_count": len(ROLE_NAMES), "config_migration": migration}, writes
 
 
 def inspect(p: dict[str, Path], writes: list[tuple[Path, str]]) -> dict[str, Any]:
@@ -552,6 +746,11 @@ def inspect(p: dict[str, Path], writes: list[tuple[Path, str]]) -> dict[str, Any
         "ok": not conflicts,
         "skill": str(p["skill"]),
         "managed": managed,
+        "config_migration": (
+            "remove_legacy_agents_enabled"
+            if manifest is not None and manifest["installer_version"] in LEGACY_INSTALL_VERSIONS
+            else "none"
+        ),
         "agent_conflicts": conflicts,
         "mcp_touched": False,
         "permission_enforcement": private_permission_enforcement(),
@@ -1058,24 +1257,23 @@ def promote(
         cleanup_staged(staged)
 
 
-def build_install_staging(p: dict[str, Path], writes: list[tuple[Path, str]], link: bool) -> tuple[list[tuple[Path, Path | None]], dict[str, Any]]:
+def build_install_staging(p: dict[str, Path], writes: list[tuple[Path, str]]) -> tuple[list[tuple[Path, Path | None]], dict[str, Any]]:
     staged: list[tuple[Path, Path | None]] = []
     try:
         mkdir_safe(p["skill"].parent, p)
-        expected_source_hash = tree_hash(SOURCE, source_tree=True)
-        if link:
-            staged_skill = p["skill"].parent / f".govern-agent-system.{uuid.uuid4().hex}"
-            os.symlink(SOURCE, staged_skill, target_is_directory=True)
-            staged.append((p["skill"], staged_skill))
-            skill_hash = expected_source_hash
-        else:
-            container = Path(tempfile.mkdtemp(prefix=".govern-agent-system.", dir=p["skill"].parent))
-            staged_skill = container / "payload"
-            staged.append((p["skill"], staged_skill))
-            shutil.copytree(SOURCE, staged_skill, ignore=shutil.ignore_patterns(*SOURCE_IGNORED_PARTS, "*.pyc"))
-            skill_hash = tree_hash(staged_skill)
-            if skill_hash != expected_source_hash:
-                raise InstallError("staged Skill does not match source")
+        skill_raw = packaged_file(SKILL_SOURCE)
+        container = Path(tempfile.mkdtemp(prefix=".govern-agent-system.", dir=p["skill"].parent))
+        staged_skill = container / "payload"
+        staged_skill.mkdir(mode=0o700)
+        (staged_skill / "SKILL.md").write_bytes(skill_raw)
+        restrict_tree(staged_skill)
+        staged.append((p["skill"], staged_skill))
+        skill_hash = tree_hash(staged_skill)
+        expected_skill_hash = hashlib.sha256(
+            b"F\0SKILL.md\0" + hashlib.sha256(skill_raw).digest()
+        ).hexdigest()
+        if skill_hash != expected_skill_hash:
+            raise InstallError("staged Skill does not match packaged Skill")
         write_map = dict(writes)
         config_content = write_map.pop(p["config"])
         adapters: dict[str, dict[str, str]] = {}
@@ -1089,17 +1287,17 @@ def build_install_staging(p: dict[str, Path], writes: list[tuple[Path, str]], li
             raise InstallError("unexpected generation plan entries")
         staged.append((p["config"], stage_file(p["config"].parent, config_content.encode("utf-8"), p)))
         parsed_config = tomllib.loads(config_content)
-        managed_values = {key: parsed_config["agents"][key] for key in core.CONFIG_KEY_ORDER}
+        managed_values = {key: parsed_config["agents"][key] for key in CONFIG_KEY_ORDER}
         manifest = {
             "schema_version": MANIFEST_SCHEMA,
             "identity": IDENTITY,
             "installer_version": INSTALL_VERSION,
             "destinations": expected_destinations(p),
-            "link": link,
+            "link": False,
             "skill": {
-                "kind": "symlink" if link else "directory",
+                "kind": "directory",
                 "content_sha256": skill_hash,
-                "target": str(canonical(SOURCE)) if link else None,
+                "target": None,
             },
             "adapters": adapters,
             "config": {
@@ -1116,15 +1314,15 @@ def build_install_staging(p: dict[str, Path], writes: list[tuple[Path, str]], li
         raise
 
 
-def install(link: bool) -> dict[str, Any]:
+def install() -> dict[str, Any]:
     p = paths()
     ensure_mutation_allowed(p)
-    _, preliminary = build_generation_plan(p)
+    _, preliminary = build_install_plan(p)
     lock = acquire_lock(p)
     try:
         hold_lock_for_test()
         ensure_mutation_allowed(p)
-        _, writes = build_generation_plan(p)
+        _, writes = build_install_plan(p)
         if writes != preliminary:
             raise InstallError("configuration changed while acquiring install lock")
         status = inspect(p, writes)
@@ -1132,7 +1330,7 @@ def install(link: bool) -> dict[str, Any]:
             raise InstallError("refusing unmanaged collision or unsafe destination")
         if status["managed"]:
             harden_existing_managed_permissions(p, lock)
-        staged, _ = build_install_staging(p, writes, link)
+        staged, _ = build_install_staging(p, writes)
         try:
             saved = create_snapshot(p, "install")
         except Exception:
@@ -1147,7 +1345,7 @@ def install(link: bool) -> dict[str, Any]:
         )
         if error is not None:
             return {"ok": False, "error": error, "snapshot": str(saved), "committed": committed, "recovery": recovered, "journal": str(p["journal"]), "mcp_touched": False}
-        return {"ok": True, "installed": str(p["skill"]), "snapshot": str(saved), "link": link, "mcp_touched": False}
+        return {"ok": True, "installed": str(p["skill"]), "snapshot": str(saved), "link": False, "mcp_touched": False}
     finally:
         release_lock(lock)
 
@@ -1200,7 +1398,7 @@ def rollback(raw: str, recover: bool) -> dict[str, Any]:
 def check() -> dict[str, Any]:
     p = paths()
     try:
-        _, writes = build_generation_plan(p)
+        _, writes = build_install_plan(p)
         return {**inspect(p, writes), "release_version": INSTALL_VERSION}
     except InstallError as exc:
         return {"ok": False, "error": str(exc), "skill": str(p["skill"]), "managed": False, "agent_conflicts": [], "mcp_touched": False, "permission_enforcement": private_permission_enforcement(), "permission_problems": [], "release_version": INSTALL_VERSION}
@@ -1216,14 +1414,13 @@ def main() -> None:
     parser.add_argument("--version", action="version", version=INSTALL_VERSION)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check")
-    item = sub.add_parser("install")
-    item.add_argument("--link", action="store_true")
+    sub.add_parser("install")
     item = sub.add_parser("rollback")
     item.add_argument("--snapshot", required=True)
     item.add_argument("--recover", action="store_true")
     args = parser.parse_args()
     try:
-        result = check() if args.command == "check" else install(args.link) if args.command == "install" else rollback(args.snapshot, args.recover)
+        result = check() if args.command == "check" else install() if args.command == "install" else rollback(args.snapshot, args.recover)
     except InstallError as exc:
         fail(str(exc))
     print(json.dumps(result, sort_keys=True))
