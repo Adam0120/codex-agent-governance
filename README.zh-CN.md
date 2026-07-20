@@ -59,6 +59,17 @@ max_depth = 1
 
 ## 安全更新与回滚
 
+### 升级已安装的受管版本
+
+进入 v0.2.1 的仓库检出目录或发行包目录后，使用新版安装器升级；不要手工复制文件覆盖已安装目录：
+
+```bash
+python3 scripts/install.py check
+python3 scripts/install.py install
+```
+
+`install` 会直接原地更新已验证来源的受管 v0.2.0 安装：先为原有受管 Skill、八个适配器和受管配置创建快照，再以原子方式只替换这些受管文件。记录命令返回的快照路径，然后重启 Codex 以重新加载自定义代理注册表。不要手工覆盖 `$HOME/.agents/skills/govern-agent-system/` 或 `${CODEX_HOME:-$HOME/.codex}/agents/*.toml`。
+
 每次安装都会创建私有快照并返回路径。恢复命令：
 
 ```bash

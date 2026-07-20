@@ -59,6 +59,17 @@ Other Codex configuration, including unrelated supported `[agents]` keys and MCP
 
 ## Safe update and rollback
 
+### Upgrade an existing managed installation
+
+From a v0.2.1 checkout or release directory, use the new installer rather than manually copying files into the installed locations:
+
+```bash
+python3 scripts/install.py check
+python3 scripts/install.py install
+```
+
+`install` directly updates a verified managed v0.2.0 installation in place: it snapshots the existing managed Skill, eight adapters, and managed configuration before atomically replacing only those managed files. Record the returned snapshot path, then restart Codex to reload the custom-agent registry. Do not manually overwrite `$HOME/.agents/skills/govern-agent-system/` or `${CODEX_HOME:-$HOME/.codex}/agents/*.toml`.
+
 Every install creates a private snapshot and returns its path. Restore it with:
 
 ```bash

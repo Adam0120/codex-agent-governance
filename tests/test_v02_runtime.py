@@ -427,6 +427,8 @@ class V02RuntimeTests(unittest.TestCase):
                 self.assertIn(f"| `{name}` | `{runtime[0]}` | {runtime[1]} | {runtime[2]} |", text)
             config_example = text.split("```toml", 1)[1].split("```", 1)[0]
             self.assertNotIn("enabled", config_example)
+        self.assertIn("Upgrade an existing managed installation", english)
+        self.assertIn("升级已安装的受管版本", chinese)
 
 
 if __name__ == "__main__":
