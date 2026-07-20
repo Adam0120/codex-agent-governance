@@ -1,6 +1,6 @@
 [project]
 name = "codex-agent-governance"
-version = "0.2.0"
+version = "0.2.1"
 description = "Experimental native eight-role delegation system for Codex"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
