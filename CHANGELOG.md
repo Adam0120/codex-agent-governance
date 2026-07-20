@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 — 2026-07-20
+
+- Rebalanced the eight native roles for lower child-agent cost: six roles now use `gpt-5.6-terra` at medium effort, `code_locator` keeps `gpt-5.3-codex-spark` at high, and advisory `semantic_reviewer` keeps `gpt-5.6-sol` at medium.
+- Narrowed every child to a frozen node and returned architecture and product decisions, risk acceptance, integration, and final acceptance to a Sol/Terra high-or-greater main agent.
+- Made one child the default, retained `max_threads = 4` and `max_depth = 1`, preserved all role names and sandboxes, and removed language-specific runtime wording.
+- Added managed v0.2.0-to-v0.2.1 role replacement and byte-exact rollback coverage without changing unrelated Codex or MCP configuration.
+
+
 ## 0.2.0 — 2026-07-20
 
 - Replaced controller-mediated dispatch with one concise Skill and eight canonical, self-contained native custom-agent TOMLs; removed the dispatch-only Luna variant, runtime profiles, overlays, generation, evaluation, verification, and telemetry interfaces.

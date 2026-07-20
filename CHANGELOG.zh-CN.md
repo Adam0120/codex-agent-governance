@@ -1,5 +1,13 @@
 # 变更日志
 
+## 0.2.1 — 2026-07-20
+
+- 为降低子代理成本重新平衡八个原生角色：六个角色改用 `gpt-5.6-terra` medium，`code_locator` 保持 `gpt-5.3-codex-spark` high，建议性质的 `semantic_reviewer` 保留 `gpt-5.6-sol` medium。
+- 将每个子代理收缩为冻结节点，并把架构与产品决策、风险接受、集成和最终验收收回 Sol/Terra high 或更高推理强度的主代理。
+- 默认只使用一个子代理，保留 `max_threads = 4`、`max_depth = 1`、全部角色名和 Sandbox，并移除运行时语言限定文案。
+- 增加受管 v0.2.0 到 v0.2.1 的角色替换与逐字节回滚覆盖，不改动无关 Codex 或 MCP 配置。
+
+
 ## 0.2.0 — 2026-07-20
 
 - 用一个精简 Skill 和八个规范、自包含的原生自定义代理 TOML 取代控制器中介 dispatch；移除仅用于 dispatch 的 Luna 变体、运行时 profile、overlay、生成、评估、验证与遥测接口。

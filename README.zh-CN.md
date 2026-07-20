@@ -1,6 +1,6 @@
 # Govern Agent System
 
-实验性 v0.2.0 提供一个精简 Codex Skill 与八个自包含自定义代理，通过 Codex 原生能力进行委派。日常运行不再需要 Python 治理控制器、请求 JSON、生成 profile、复用令牌、ledger 写入、项目 overlay 或强制 MCP 步骤。
+实验性 v0.2.1 提供一个精简 Codex Skill 与八个自包含自定义代理，通过 Codex 原生能力进行委派。日常运行不再需要 Python 治理控制器、请求 JSON、生成 profile、复用令牌、ledger 写入、项目 overlay 或强制 MCP 步骤。
 
 ## 为什么 v0.2 更简单
 
@@ -16,7 +16,7 @@ flowchart LR
   U[用户任务] --> M[主代理]
   M -->|委派无实质收益| W[直接处理]
   M -->|适合有边界的专家| R[最小合适角色]
-  R --> E[精简英文证据]
+  R --> E[精简证据]
   E --> M
   I[一次性安装器] -. 复制 Skill 与 8 个 TOML .-> M
 ```
@@ -25,14 +25,14 @@ flowchart LR
 
 | 角色 | 模型 | 推理强度 | Sandbox | 用途 |
 |---|---|---|---|---|
-| `default` | `gpt-5.6-terra` | high | read-only | 显式通用只读建议兜底 |
-| `worker` | `gpt-5.6-terra` | high | workspace-write | 已确定的实现切片 |
-| `explorer` | `gpt-5.6-terra` | high | read-only | 有边界的发现或排障 |
+| `default` | `gpt-5.6-terra` | medium | read-only | 有边界的建议节点 |
+| `worker` | `gpt-5.6-terra` | medium | workspace-write | 已确定的实现节点 |
+| `explorer` | `gpt-5.6-terra` | medium | read-only | 有边界的证据收集或排障 |
 | `code_locator` | `gpt-5.3-codex-spark` | high | read-only | 感知版本的事实位置 |
-| `cross_module_architect` | `gpt-5.6-sol` | high | read-only | 跨模块契约与迁移设计 |
-| `systems_safety` | `gpt-5.6-sol` | high | workspace-write | 并发、生命周期、密码学、授权、持久化 |
-| `semantic_reviewer` | `gpt-5.6-sol` | high | read-only | 最终语义与安全审查 |
-| `release_operator` | `gpt-5.6-sol` | high | workspace-write | 已授权且绑定版本的发布工作 |
+| `cross_module_architect` | `gpt-5.6-terra` | medium | read-only | 契约证据与候选方案 |
+| `systems_safety` | `gpt-5.6-terra` | medium | workspace-write | 主线程批准的安全不变量或补丁 |
+| `semantic_reviewer` | `gpt-5.6-sol` | medium | read-only | 建议性质的语义与安全审查 |
+| `release_operator` | `gpt-5.6-terra` | medium | workspace-write | 已授权且绑定版本的运行手册 |
 
 v0.1 中仅用于 dispatch、未验证的 `mechanical_luna` 变体已移除；它从来不是第九个角色。
 
@@ -55,7 +55,7 @@ max_depth = 1
 
 `~/.codex/agents/` 下的独立自定义代理 TOML 会被原生发现，不需要 `config_file` 声明。受支持的 `[agents]` 表包含 `max_threads`、`max_depth`、`job_max_runtime_seconds` 和 `interrupt_message` 等设置，并不存在 `enabled` 开关。参见当前 [Codex Subagents 文档](https://developers.openai.com/codex/subagents/)。
 
-其他 Codex 配置（包括不相关且受支持的 `[agents]` 键与 MCP 配置）保持不变。调用 `$govern-agent-system` 后，主代理判断委派是否有实质收益、选择最小角色、发送精简英文任务，并在相同工作面后续中按 agent id 复用同一子代理。拒绝或安全门失败意味着 `STOP`，不是扩大范围或提升权限的理由。
+其他 Codex 配置（包括不相关且受支持的 `[agents]` 键与 MCP 配置）保持不变。调用 `$govern-agent-system` 后，主代理判断委派是否有实质收益，默认只使用一个子代理，为冻结节点选择最小角色、发送精简任务，并在相同工作面后续中按 agent id 复用同一子代理。架构与产品决策、风险接受、集成和最终验收均由主代理负责。拒绝或安全门失败意味着 `STOP`，不是扩大范围或提升权限的理由。
 
 ## 安全更新与回滚
 
@@ -67,7 +67,7 @@ python3 scripts/install.py rollback --snapshot <snapshot-path>
 
 纯标准库安装器使用受限且禁止跟随链接的锁、冲突检查、内容绑定清单、完整安装前快照、分阶段原子替换、恢复隔离和精确目标回滚。未知受管状态、symlink/reparse point、敏感硬链接、畸形清单、歧义的 dotted `[agents]` 键以及已变更的受管内容都会默认拒绝。在 POSIX 上，状态/快照目录限制为 `0700`，敏感文件为 `0600`。`check` 只读。安装、检查和回滚均不修改 MCP 配置。
 
-已发布且受管的 v0.1.0、v0.1.1 与 v0.1.2 复制或链接安装，在验证其记录来源后可更新至 v0.2.0。更新会替换受管 Skill 和八个适配器，从已安装 Skill 中移除控制器/目录产物，并且只从真实 `[agents]` 表删除旧安装器拥有的 `enabled = true`。非代理配置、不相关且受支持的 `[agents]` 键、MCP 设置和受管目标外的未知用户文件都会保留；旧 `ledger.jsonl` 字节仍作为惰性数据原样保留。未知版本、无法证明来源或位置有歧义的 `agents.enabled` 会默认拒绝。v0.2 运行时不会将 ledger 作为遥测读取或写入。更新快照会逐字节恢复旧配置，包括 `enabled = true`；旧链接 Skill 仅作为验证后的迁移输入被接受，因为 v0.2 已不再提供 `install --link`。
+已发布且受管的 v0.2.0 安装在验证其记录来源后可更新至 v0.2.1。更新会用轻量角色矩阵替换受管 Skill 和八个适配器，同时保留非代理配置、不相关且受支持的 `[agents]` 键、MCP 设置和受管目标外的未知用户文件。已发布且受管的 v0.1.0、v0.1.1 与 v0.1.2 复制或链接安装也可直接更新至 v0.2.1；更新会移除控制器/目录产物以及真实 `[agents]` 表中旧安装器拥有的 `enabled = true`，旧 `ledger.jsonl` 字节仍作为惰性数据原样保留。未知版本、无法证明来源或位置有歧义的 `agents.enabled` 会默认拒绝。v0.2 运行时不会将 ledger 作为遥测读取或写入。更新快照会逐字节恢复先前配置；旧链接 Skill 仅作为验证后的迁移输入，因为 v0.2 已不再提供 `install --link`。
 
 如果无法验证恢复结果，所有受管写入都会继续被隔离。只能使用安装器报告的精确恢复命令与快照，不要手工删除 journal。
 
@@ -89,7 +89,7 @@ python3 scripts/install.py rollback --snapshot <snapshot-path>
 
 ## 实验性兼容与证据限制
 
-v0.2.0 面向当前 Codex 自定义代理 TOML 字段，以及由 Sol/Terra high 或更高推理强度主代理执行的原生代理启动。这些接口可能变化。请先在隔离的 `HOME`/`CODEX_HOME` 中验证，保留安装返回的快照，并在安装后重启 Codex。
+v0.2.1 面向当前 Codex 自定义代理 TOML 字段，以及由 Sol/Terra high 或更高推理强度主代理执行的原生代理启动。这些接口可能变化。请先在隔离的 `HOME`/`CODEX_HOME` 中验证，保留安装返回的快照，并在安装后重启 Codex。
 
 本地测试覆盖受支持 Python 版本与 CI 操作系统上的确定性文件系统和配置行为，但不能证明模型质量、成本下降、完成速度提升、CodeGraph 可用性、生产发布安全或真实多代理效果更优。本项目没有受控现场研究或生产部署结论。
 

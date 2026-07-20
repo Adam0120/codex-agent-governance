@@ -25,14 +25,14 @@ ROLE_NAMES = {
     "release_operator",
 }
 ROLE_MATRIX = {
-    "default": ("gpt-5.6-terra", "high", "read-only"),
-    "worker": ("gpt-5.6-terra", "high", "workspace-write"),
-    "explorer": ("gpt-5.6-terra", "high", "read-only"),
+    "default": ("gpt-5.6-terra", "medium", "read-only"),
+    "worker": ("gpt-5.6-terra", "medium", "workspace-write"),
+    "explorer": ("gpt-5.6-terra", "medium", "read-only"),
     "code_locator": ("gpt-5.3-codex-spark", "high", "read-only"),
-    "cross_module_architect": ("gpt-5.6-sol", "high", "read-only"),
-    "systems_safety": ("gpt-5.6-sol", "high", "workspace-write"),
-    "semantic_reviewer": ("gpt-5.6-sol", "high", "read-only"),
-    "release_operator": ("gpt-5.6-sol", "high", "workspace-write"),
+    "cross_module_architect": ("gpt-5.6-terra", "medium", "read-only"),
+    "systems_safety": ("gpt-5.6-terra", "medium", "workspace-write"),
+    "semantic_reviewer": ("gpt-5.6-sol", "medium", "read-only"),
+    "release_operator": ("gpt-5.6-terra", "medium", "workspace-write"),
 }
 BANNED_RUNTIME_TEXT = (
     "agent_system.py",
@@ -56,10 +56,16 @@ def run(*args, env, ok=True):
     return result
 
 
+def canonical_root(path):
+    return path.parent.resolve(strict=False) / path.name
+
+
 def isolated(temp):
-    home = Path(temp) / "home"
-    codex = Path(temp) / "codex"
-    env = {**os.environ, "HOME": str(home), "CODEX_HOME": str(codex)}
+    raw_home = Path(temp) / "home"
+    raw_codex = Path(temp) / "codex"
+    home = canonical_root(raw_home)
+    codex = canonical_root(raw_codex)
+    env = {**os.environ, "HOME": str(raw_home), "CODEX_HOME": str(raw_codex)}
     return home, codex, env
 
 
@@ -180,6 +186,8 @@ class V02RuntimeTests(unittest.TestCase):
     def test_packaged_runtime_is_direct_self_contained_and_exact(self):
         adapters = {path.stem: tomllib.loads(path.read_text(encoding="utf-8")) for path in ROLE_DIR.glob("*.toml")}
         self.assertEqual(set(adapters), ROLE_NAMES)
+        self.assertEqual({name for name, runtime in ROLE_MATRIX.items() if runtime[1] == "high"}, {"code_locator"})
+        self.assertEqual({name for name, runtime in ROLE_MATRIX.items() if runtime[0] == "gpt-5.6-sol"}, {"semantic_reviewer"})
         for name, document in adapters.items():
             self.assertEqual(
                 (document["model"], document["model_reasoning_effort"], document["sandbox_mode"]),
@@ -188,12 +196,32 @@ class V02RuntimeTests(unittest.TestCase):
             instructions = document["developer_instructions"].lower()
             self.assertIn("spawn child agents", instructions)
             self.assertRegex(instructions, r"do not[^.]*spawn child agents")
-            self.assertIn("compact english", instructions)
+            self.assertIn("frozen", instructions)
+            self.assertIn("stop", instructions)
+            self.assertIn("parent owns", instructions)
+            self.assertNotIn("english", instructions)
             self.assertIn("skills", instructions)
             self.assertIn("mcp", instructions)
             for banned in BANNED_RUNTIME_TEXT:
                 self.assertNotIn(banned, instructions)
+        narrowed_contracts = {
+            "cross_module_architect": ("candidate options", "do not select product behavior"),
+            "systems_safety": ("exact parent-approved", "accept risk"),
+            "semantic_reviewer": (
+                "findings are advisory",
+                "do not approve, reject, merge, release, or claim final acceptance",
+            ),
+            "release_operator": ("revision-bound runbook", "idempotency precondition", "live state has drifted"),
+        }
+        for name, required in narrowed_contracts.items():
+            instructions = adapters[name]["developer_instructions"].lower()
+            for literal in required:
+                self.assertIn(literal, instructions)
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8").lower()
+        self.assertIn("one child by default", skill)
+        self.assertIn("final acceptance", skill)
+        self.assertIn("user decisions", skill)
+        self.assertNotIn("english", skill)
         for banned in BANNED_RUNTIME_TEXT:
             self.assertNotIn(banned, skill)
         self.assertNotIn("mechanical_luna", "\n".join(path.read_text(encoding="utf-8") for path in ROLE_DIR.glob("*.toml")))
@@ -385,7 +413,7 @@ class V02RuntimeTests(unittest.TestCase):
         chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
         for text in (english, chinese):
             for literal in (
-                "0.2.0",
+                "0.2.1",
                 "python3 scripts/install.py check",
                 "python3 scripts/install.py install",
                 "python3 scripts/install.py rollback --snapshot <snapshot-path>",
@@ -396,8 +424,7 @@ class V02RuntimeTests(unittest.TestCase):
             ):
                 self.assertIn(literal, text)
             for name, runtime in ROLE_MATRIX.items():
-                self.assertIn(f"`{name}`", text)
-                self.assertIn(f"`{runtime[0]}`", text)
+                self.assertIn(f"| `{name}` | `{runtime[0]}` | {runtime[1]} | {runtime[2]} |", text)
             config_example = text.split("```toml", 1)[1].split("```", 1)[0]
             self.assertNotIn("enabled", config_example)
 

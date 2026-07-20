@@ -1,6 +1,6 @@
+import hashlib
 import json
 import os
-import re
 import shutil
 import stat
 import subprocess
@@ -15,6 +15,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL = ROOT / "scripts" / "install.py"
+V020_FIXTURE = ROOT / "tests" / "fixtures" / "v0.2.0"
 
 def canonical_root(path):
     return path.parent.resolve(strict=False) / path.name
@@ -65,14 +66,95 @@ def mode_byte_state(root):
         result[relative] = (stat.S_IMODE(info.st_mode), payload)
     return result
 
-def release_copy(target, version, marker):
-    shutil.copytree(ROOT, target, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "build", "dist"))
-    project = target / "pyproject.toml"
-    project.write_text(re.sub(r'version = "[0-9]+\.[0-9]+\.[0-9]+"', f'version = "{version}"', project.read_text()))
-    installer = target / "scripts/install.py"
-    installer.write_text(re.sub(r'INSTALL_VERSION = "[0-9]+\.[0-9]+\.[0-9]+"', f'INSTALL_VERSION = "{version}"', installer.read_text()))
-    skill = target / "SKILL.md"
-    skill.write_text(skill.read_text() + f"\n<!-- release {marker} -->\n")
+def sha256_bytes(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+def seed_managed_v020(home, codex, config_bytes=b"[agents]\nmax_threads = 4\nmax_depth = 1\n"):
+    release = json.loads((V020_FIXTURE / "release.json").read_text(encoding="utf-8"))
+    if release["source_revision"] != "def07224be678695090359b355e40f033f419041":
+        raise AssertionError("v0.2.0 fixture revision drift")
+
+    skill_raw = (V020_FIXTURE / "SKILL.md").read_bytes()
+    if sha256_bytes(skill_raw) != release["skill"]["file_sha256"]:
+        raise AssertionError("v0.2.0 Skill fixture hash mismatch")
+    skill_tree_sha256 = sha256_bytes(b"F\0SKILL.md\0" + hashlib.sha256(skill_raw).digest())
+    if skill_tree_sha256 != release["skill"]["tree_sha256"]:
+        raise AssertionError("v0.2.0 Skill tree hash mismatch")
+
+    fixture_agents = V020_FIXTURE / "agents"
+    actual_roles = {path.stem for path in fixture_agents.glob("*.toml")}
+    if actual_roles != set(release["adapters"]):
+        raise AssertionError("v0.2.0 adapter fixture inventory mismatch")
+    skill = home / ".agents/skills/govern-agent-system"
+    agents = codex / "agents"
+    state = codex / "agent-system"
+    skill.mkdir(parents=True)
+    agents.mkdir(parents=True)
+    state.mkdir(parents=True)
+    (skill / "SKILL.md").write_bytes(skill_raw)
+
+    adapter_records = {}
+    for name, expected_sha256 in release["adapters"].items():
+        raw = (fixture_agents / f"{name}.toml").read_bytes()
+        if sha256_bytes(raw) != expected_sha256:
+            raise AssertionError(f"v0.2.0 adapter fixture hash mismatch: {name}")
+        destination = agents / f"{name}.toml"
+        destination.write_bytes(raw)
+        adapter_records[name] = {"path": str(destination), "sha256": expected_sha256}
+
+    managed = release["config"]["managed"]
+    managed_sha256 = sha256_bytes(json.dumps(managed, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    if managed_sha256 != release["config"]["managed_sha256"]:
+        raise AssertionError("v0.2.0 managed config fixture hash mismatch")
+    parsed_config = tomllib.loads(config_bytes.decode("utf-8"))
+    if not isinstance(parsed_config.get("agents"), dict) or any(parsed_config["agents"].get(key) != value for key, value in managed.items()):
+        raise AssertionError("v0.2.0 fixture config lacks managed values")
+    config = codex / "config.toml"
+    config.write_bytes(config_bytes)
+
+    manifest_path = state / "managed-install.json"
+    manifest = {
+        "schema_version": release["schema_version"],
+        "identity": release["identity"],
+        "installer_version": release["installer_version"],
+        "destinations": {
+            "agents": str(agents),
+            "config": str(config),
+            "manifest": str(manifest_path),
+            "skill": str(skill),
+        },
+        "link": False,
+        "skill": {"kind": "directory", "content_sha256": skill_tree_sha256, "target": None},
+        "adapters": adapter_records,
+        "config": {"path": str(config), "managed": managed, "managed_sha256": managed_sha256},
+    }
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+    snapshot = state / "snapshots" / release["snapshot_name"]
+    snapshot.mkdir(parents=True)
+    entries = [
+        {"label": "skill", "path": str(skill), "kind": "missing", "sha256": None, "target": None},
+        {"label": "config", "path": str(config), "kind": "missing", "sha256": None, "target": None},
+        {"label": "managed-manifest", "path": str(manifest_path), "kind": "missing", "sha256": None, "target": None},
+        *[
+            {"label": f"agent-{name}", "path": str(agents / f"{name}.toml"), "kind": "missing", "sha256": None, "target": None}
+            for name in sorted(release["adapters"])
+        ],
+    ]
+    snapshot_manifest = {
+        "schema_version": 2,
+        "identity": release["identity"],
+        "installer_version": release["installer_version"],
+        "purpose": "install",
+        "entries": entries,
+    }
+    (snapshot / "manifest.json").write_text(json.dumps(snapshot_manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+    for directory in [skill.parent.parent, skill.parent, skill, codex, agents, state, snapshot.parent, snapshot]:
+        directory.chmod(0o700)
+    for path in [skill / "SKILL.md", *agents.glob("*.toml"), config, manifest_path, snapshot / "manifest.json"]:
+        path.chmod(0o600)
+    return snapshot
 
 class GovernanceTests(unittest.TestCase):
     def test_installer_collision_update_and_rollback(self):
@@ -235,33 +317,51 @@ class GovernanceTests(unittest.TestCase):
             except OSError as exc:
                 self.skipTest(f"symlinks unavailable: {exc}")
             self.assertNotEqual(run(INSTALL, "install", env=env, ok=False).returncode, 0); self.assertEqual(list(outside.iterdir()), [])
-    def test_copy_updates_validate_recorded_release_provenance(self):
+    def test_pinned_v020_update_replaces_roles_and_rolls_back_exactly(self):
         with tempfile.TemporaryDirectory() as temp:
-            release_a = Path(temp) / "release-a"; release_b = Path(temp) / "release-b"
-            release_copy(release_a, "0.2.0", "A"); release_copy(release_b, "0.2.1", "B")
             home, codex, env = isolated(temp)
-            first = json.loads(run(release_a / "scripts/install.py", "install", env=env).stdout)
+            old_snapshot = seed_managed_v020(home, codex)
+            old_snapshot_state = mode_byte_state(old_snapshot)
             before = state_bytes(home, codex)
-            updated = json.loads(run(release_b / "scripts/install.py", "install", env=env).stdout)
+            installed_agent = codex / "agents/default.toml"
+            before_agent = installed_agent.read_bytes()
+            updated = json.loads(run(INSTALL, "install", env=env).stdout)
             target = home / ".agents/skills/govern-agent-system"
             manifest = json.loads((codex / "agent-system/managed-install.json").read_text())
-            self.assertTrue(first["ok"] and updated["ok"])
+            installed_runtime = tomllib.loads(installed_agent.read_text())
+            self.assertTrue(updated["ok"])
             self.assertEqual(manifest["installer_version"], "0.2.1")
-            self.assertIn("release B", (target / "SKILL.md").read_text())
-            self.assertTrue(json.loads(run(release_b / "scripts/install.py", "rollback", "--snapshot", updated["snapshot"], env=env).stdout)["ok"])
+            self.assertIn("Use one child by default.", (target / "SKILL.md").read_text())
+            self.assertEqual(
+                (installed_runtime["model"], installed_runtime["model_reasoning_effort"]),
+                ("gpt-5.6-terra", "medium"),
+            )
+            self.assertNotEqual(installed_agent.read_bytes(), before_agent)
+            self.assertEqual(mode_byte_state(old_snapshot), old_snapshot_state)
+            self.assertTrue(json.loads(run(INSTALL, "rollback", "--snapshot", updated["snapshot"], env=env).stdout)["ok"])
+            self.assertEqual(installed_agent.read_bytes(), before_agent)
             self.assertEqual(state_bytes(home, codex), before)
-    def test_isolated_install_update_and_rollback_leave_mcp_untouched(self):
+            self.assertEqual(mode_byte_state(old_snapshot), old_snapshot_state)
+    def test_pinned_v020_update_preserves_unknown_config_and_mcp(self):
         with tempfile.TemporaryDirectory() as temp:
-            release_a, release_b = Path(temp) / "release-a", Path(temp) / "release-b"
-            release_copy(release_a, "0.2.0", "A"); release_copy(release_b, "0.2.1", "B")
-            home, codex, env = isolated(temp); codex.mkdir(parents=True)
+            home, codex, env = isolated(temp)
+            seed_managed_v020(
+                home,
+                codex,
+                b'top = "preserved"\n\n[agents]\nfuture_key = "preserved"\n\nmax_threads = 4\nmax_depth = 1\n[mcp]\nendpoint = "preserved"\n',
+            )
+            config = codex / "config.toml"
             mcp_config = codex / "mcp.toml"; before = b"[mcp]\nendpoint = 'unchanged'\n"; mcp_config.write_bytes(before)
-            first = json.loads(run(release_a / "scripts/install.py", "install", env=env).stdout)
-            updated = json.loads(run(release_b / "scripts/install.py", "install", env=env).stdout)
-            restored = json.loads(run(release_b / "scripts/install.py", "rollback", "--snapshot", updated["snapshot"], env=env).stdout)
-            self.assertTrue(first["ok"] and updated["ok"] and restored["ok"])
-            self.assertFalse(first["mcp_touched"]); self.assertFalse(updated["mcp_touched"]); self.assertFalse(restored["mcp_touched"])
+            installed_config = config.read_bytes()
+            installed_state = state_bytes(home, codex)
+            updated = json.loads(run(INSTALL, "install", env=env).stdout)
+            self.assertEqual(config.read_bytes(), installed_config)
+            restored = json.loads(run(INSTALL, "rollback", "--snapshot", updated["snapshot"], env=env).stdout)
+            self.assertTrue(updated["ok"] and restored["ok"])
+            self.assertFalse(updated["mcp_touched"]); self.assertFalse(restored["mcp_touched"])
+            self.assertEqual(config.read_bytes(), installed_config)
             self.assertEqual(mcp_config.read_bytes(), before)
+            self.assertEqual(state_bytes(home, codex), installed_state)
     @unittest.skipIf(os.name == "nt", "POSIX modes are not Windows ACL guarantees")
     def test_snapshot_permissions_diagnose_and_remediate_legacy_state(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -23,18 +23,18 @@ import managed_lock
 
 SOURCE = Path(os.path.abspath(__file__)).parents[1]
 IDENTITY = "govern-agent-system"
-INSTALL_VERSION = "0.2.0"
+INSTALL_VERSION = "0.2.1"
 MANIFEST_SCHEMA = 1
 SNAPSHOT_SCHEMA = 2
 ROLE_RUNTIME = {
-    "default": ("gpt-5.6-terra", "high", "read-only"),
-    "worker": ("gpt-5.6-terra", "high", "workspace-write"),
-    "explorer": ("gpt-5.6-terra", "high", "read-only"),
+    "default": ("gpt-5.6-terra", "medium", "read-only"),
+    "worker": ("gpt-5.6-terra", "medium", "workspace-write"),
+    "explorer": ("gpt-5.6-terra", "medium", "read-only"),
     "code_locator": ("gpt-5.3-codex-spark", "high", "read-only"),
-    "cross_module_architect": ("gpt-5.6-sol", "high", "read-only"),
-    "systems_safety": ("gpt-5.6-sol", "high", "workspace-write"),
-    "semantic_reviewer": ("gpt-5.6-sol", "high", "read-only"),
-    "release_operator": ("gpt-5.6-sol", "high", "workspace-write"),
+    "cross_module_architect": ("gpt-5.6-terra", "medium", "read-only"),
+    "systems_safety": ("gpt-5.6-terra", "medium", "workspace-write"),
+    "semantic_reviewer": ("gpt-5.6-sol", "medium", "read-only"),
+    "release_operator": ("gpt-5.6-terra", "medium", "workspace-write"),
 }
 ROLE_NAMES = tuple(sorted(ROLE_RUNTIME))
 SKILL_SOURCE = SOURCE / "SKILL.md"
