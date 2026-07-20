@@ -56,10 +56,16 @@ def run(*args, env, ok=True):
     return result
 
 
+def canonical_root(path):
+    return path.parent.resolve(strict=False) / path.name
+
+
 def isolated(temp):
-    home = Path(temp) / "home"
-    codex = Path(temp) / "codex"
-    env = {**os.environ, "HOME": str(home), "CODEX_HOME": str(codex)}
+    raw_home = Path(temp) / "home"
+    raw_codex = Path(temp) / "codex"
+    home = canonical_root(raw_home)
+    codex = canonical_root(raw_codex)
+    env = {**os.environ, "HOME": str(raw_home), "CODEX_HOME": str(raw_codex)}
     return home, codex, env
 
 
