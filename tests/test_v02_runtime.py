@@ -244,7 +244,9 @@ class V02RuntimeTests(unittest.TestCase):
             "complete",
             "partial",
             "one active writer per worktree/file set",
-            "same precise node repeatedly fails for reasoning quality",
+            "twice in succession for the same task",
+            "one higher supported model or reasoning level",
+            "re-bounded task still fails for reasoning quality",
         )
         for literal in required:
             self.assertIn(literal, skill)

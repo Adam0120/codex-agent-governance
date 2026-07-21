@@ -40,7 +40,7 @@ Every non-locator child returns a compact terminal envelope: **COMPLETE**, **PAR
 
 ## Capability progression
 
-Do not treat a review finding as proof that a role or model is inadequate until the dispatchability gate was met. First shrink the node, reproduce the exact boundary, and add the missing acceptance signal. Increase capability by one supported level only when the same precise node repeatedly fails for reasoning quality rather than a tool, environment, authority, or scope problem. Reserve the highest-cost review capability for a frozen high-risk diff; never use it to compensate for an oversized implementation assignment.
+Do not treat a review finding as proof that a role or model is inadequate until the dispatchability gate was met. First shrink the node, reproduce the exact boundary, and add the missing acceptance signal. A refusal, failed safety gate, missing authority, or external blocker remains `STOP` and is not a capability-escalation signal. Otherwise, if the same child returns `PARTIAL` or a scope/ambiguity `STOP` twice in succession for the same task, do not keep re-prompting it unchanged: reduce the owned scope when the slice is too broad, clarify the objective/invariant/expected result when the target is ambiguous, or do both. Only when the re-bounded task still fails for reasoning quality rather than a tool, environment, authority, or scope problem may the parent create a newly bounded node at one higher supported model or reasoning level. Do not increase both task breadth and capability in the same retry. Reserve the highest-cost review capability for a frozen high-risk diff; never use it to compensate for an oversized implementation assignment.
 
 ## Native delegation
 
