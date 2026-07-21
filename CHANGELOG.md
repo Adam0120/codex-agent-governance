@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.3 — 2026-07-21
+
+- Added a schema-aware compatibility path for task surfaces that expose `spawn_agent` but omit `agent_type`: instead of accidentally inheriting the parent model, ordinary dispatches explicitly pass the fixed role model/effort profile. Native role binding remains preferred whenever `agent_type` is available.
+- Made the boundary explicit: compatibility dispatch does not load the TOML sandbox or developer profile, never masquerades as a bound role, keeps the parent writer lease and evidence checks, and does not emit user-facing model-binding telemetry. Mature existing children are not restarted solely to rebind; the rule applies to their next newly bounded node.
+
+## 0.2.2 — 2026-07-21
+
+- Raised the managed horizontal concurrency cap from four to six child threads, matching the current Codex default while retaining `max_depth = 1`; current-format manifests remain upgradeable or uninstallable using their exact manifest-proven positive thread and non-negative depth values rather than a release-number mapping.
+- Made role binding explicit: native spawns must pass `agent_type`, keep ordinary model/effort selection in the registered adapter, and avoid full-history inheritance; task labels alone no longer masquerade as role selection. Skill loading now supports any capable high-or-greater main model or an explicit user request.
+- Restored explicit per-role model and effort defaults based on v0.2.1, while moving the bounded `default`, `worker`, and `explorer` roles to `gpt-5.6-luna` at high effort. `code_locator` remains Spark/high, critical execution roles remain Terra/medium, and `semantic_reviewer` remains Sol/medium.
+- Kept the existing eight roles: the main agent freezes the objective and acceptance boundary, then Luna-backed roles escalate to Terra only after repeated reasoning failure. No separate Luna role or user-visible dispatch/binding ledger is required.
+- Made current-format compatibility independent of release-number ordering: verified v0.2-format sources can skip versions or carry a higher version than the CLI, while exact schema and provenance remain mandatory.
+- Added snapshot-backed atomic `uninstall`, removing only manifest-proven managed files and configuration keys while preserving user agents, unrelated Codex configuration, and MCP settings; removed the v0.1 migration path.
+- Made transaction recovery durable across interruption and process death: every replacement plan and cleanup artifact is journaled before mutation, every nonterminal journal fences writers, and exact rollback removes transaction debris. Proven dead-owner locks are safely reclaimable both for explicit journal recovery and for the no-journal edges before journal creation or after journal close; the replacement owner rechecks the journal and cleans only the reserved staging namespace. Manifest and snapshot schema/provenance integers now require exact JSON scalar types rather than Python equality.
+- Added a publishable `codex-agent-governance` Python entry point with a single-source wheel payload, enabling `uvx ...@latest install` after publication without duplicating installer logic.
+
 ## 0.2.1 — 2026-07-20
 
 - Rebalanced the eight native roles for lower child-agent cost: six roles now use `gpt-5.6-terra` at medium effort, `code_locator` keeps `gpt-5.3-codex-spark` at high, and advisory `semantic_reviewer` keeps `gpt-5.6-sol` at medium.

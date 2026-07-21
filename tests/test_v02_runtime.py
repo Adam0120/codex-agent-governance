@@ -25,9 +25,9 @@ ROLE_NAMES = {
     "release_operator",
 }
 ROLE_MATRIX = {
-    "default": ("gpt-5.6-terra", "medium", "read-only"),
-    "worker": ("gpt-5.6-terra", "medium", "workspace-write"),
-    "explorer": ("gpt-5.6-terra", "medium", "read-only"),
+    "default": ("gpt-5.6-luna", "high", "read-only"),
+    "worker": ("gpt-5.6-luna", "high", "workspace-write"),
+    "explorer": ("gpt-5.6-luna", "high", "read-only"),
     "code_locator": ("gpt-5.3-codex-spark", "high", "read-only"),
     "cross_module_architect": ("gpt-5.6-terra", "medium", "read-only"),
     "systems_safety": ("gpt-5.6-terra", "medium", "workspace-write"),
@@ -110,7 +110,7 @@ def destination_state(home, codex):
     return result
 
 
-def seed_managed_legacy(home, codex, version="0.1.2"):
+def seed_pre_modern_managed_state(home, codex, version="0.1.2"):
     skill = home / ".agents/skills/govern-agent-system"
     (skill / "scripts").mkdir(parents=True)
     (skill / "references").mkdir()
@@ -183,12 +183,38 @@ def seed_managed_legacy(home, codex, version="0.1.2"):
 
 
 class V02RuntimeTests(unittest.TestCase):
+    def test_modern_format_compatibility_is_independent_of_version_order(self):
+        spec = __import__("importlib").util.spec_from_file_location("governance_installer_version_test", INSTALL)
+        installer = __import__("importlib").util.module_from_spec(spec)
+        sys.path.insert(0, str(INSTALL.parent))
+        try:
+            spec.loader.exec_module(installer)
+        finally:
+            sys.path.pop(0)
+        self.assertTrue(installer.modern_format_compatible("0.2.0"))
+        self.assertTrue(installer.modern_format_compatible("0.2.4"))
+        self.assertTrue(installer.modern_format_compatible("0.9.7"))
+        self.assertTrue(installer.modern_format_compatible("1.3.1"))
+        self.assertTrue(installer.modern_format_compatible("999.999.999"))
+        self.assertFalse(installer.modern_format_compatible("0.1.99"))
+        self.assertFalse(installer.modern_format_compatible("invalid"))
+        self.assertTrue(installer.compatible_managed_agents({"max_threads": 8, "max_depth": 0}))
+        self.assertFalse(installer.compatible_managed_agents({"max_threads": 0, "max_depth": 1}))
+        self.assertFalse(installer.compatible_managed_agents({"max_threads": 6, "max_depth": -1}))
+        self.assertFalse(installer.compatible_managed_agents({"max_threads": 6.0, "max_depth": 1}))
+        self.assertFalse(installer.compatible_managed_agents({"max_threads": 6, "max_depth": True}))
+        self.assertFalse(installer.compatible_managed_agents({"max_threads": 6, "max_depth": 1, "future": 1}))
+
     def test_packaged_runtime_is_direct_self_contained_and_exact(self):
         adapters = {path.stem: tomllib.loads(path.read_text(encoding="utf-8")) for path in ROLE_DIR.glob("*.toml")}
         self.assertEqual(set(adapters), ROLE_NAMES)
-        self.assertEqual({name for name, runtime in ROLE_MATRIX.items() if runtime[1] == "high"}, {"code_locator"})
+        self.assertEqual({name for name, runtime in ROLE_MATRIX.items() if runtime[0] == "gpt-5.6-luna"}, {"default", "worker", "explorer"})
         self.assertEqual({name for name, runtime in ROLE_MATRIX.items() if runtime[0] == "gpt-5.6-sol"}, {"semantic_reviewer"})
         for name, document in adapters.items():
+            self.assertEqual(
+                set(document),
+                {"name", "description", "model", "model_reasoning_effort", "sandbox_mode", "developer_instructions"},
+            )
             self.assertEqual(
                 (document["model"], document["model_reasoning_effort"], document["sandbox_mode"]),
                 ROLE_MATRIX[name],
@@ -231,7 +257,7 @@ class V02RuntimeTests(unittest.TestCase):
         self.assertNotIn("mechanical_luna", "\n".join(path.read_text(encoding="utf-8") for path in ROLE_DIR.glob("*.toml")))
         self.assertEqual(
             tomllib.loads((ROOT / ".codex/config.toml").read_text(encoding="utf-8"))["agents"],
-            {"max_threads": 4, "max_depth": 1},
+            {"max_threads": 6, "max_depth": 1},
         )
 
     def test_skill_requires_a_precise_single_node_dispatch_envelope(self):
@@ -250,16 +276,41 @@ class V02RuntimeTests(unittest.TestCase):
             "twice in succession for the same task",
             "one higher supported model or reasoning level",
             "re-bounded task still fails for reasoning quality",
+            "freeze the single objective",
+            "acceptance boundary",
+            "inspect the actual native spawn schema before calling it",
+            "when it exposes `agent_type`, pass the selected role through that field",
+            "a task name or label does not bind a role",
+            "omit direct `model` and `reasoning_effort` overrides",
+            "when `agent_type` is absent, use profile compatibility mode",
+            "do not claim its toml sandbox/profile was loaded",
+            "compatibility exception, not a capability escalation",
+            "never use an omitted or `all` full-history fork",
+            "any capable main model",
         )
         for literal in required:
             self.assertIn(literal, skill)
+        for profile in (
+            "`code_locator` → `gpt-5.3-codex-spark`/high",
+            "`default`, `worker`, and `explorer` → `gpt-5.6-luna`/high",
+            "`cross_module_architect`, `systems_safety`, and `release_operator` → `gpt-5.6-terra`/medium",
+            "`semantic_reviewer` → `gpt-5.6-sol`/medium",
+        ):
+            self.assertIn(profile.lower(), skill)
+        self.assertNotIn("model_binding=", skill)
+        self.assertNotIn("resolved_model=", skill)
+        self.assertNotIn("sol or terra main agent", skill)
 
         readme = (ROOT / "README.md").read_text(encoding="utf-8").lower()
         readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
         self.assertIn("## dispatch discipline", readme)
         self.assertIn("one observable state transition or one evidence question", readme)
+        self.assertNotIn("model_binding=", readme)
+        self.assertNotIn("resolved_model=", readme)
         self.assertIn("## 派发纪律", readme_zh)
         self.assertIn("一个可观察状态转换或一个证据问题", readme_zh)
+        self.assertNotIn("model_binding=", readme_zh)
+        self.assertNotIn("resolved_model=", readme_zh)
 
     def test_fresh_install_payload_config_and_read_only_check(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -281,7 +332,7 @@ class V02RuntimeTests(unittest.TestCase):
             for path in adapter_paths:
                 tomllib.loads(path.read_text(encoding="utf-8"))
             parsed = tomllib.loads(config.read_text(encoding="utf-8"))
-            self.assertEqual(parsed["agents"], {"future_key": "keep", "max_depth": 1, "max_threads": 4})
+            self.assertEqual(parsed["agents"], {"future_key": "keep", "max_depth": 1, "max_threads": 6})
             self.assertEqual(parsed["mcp"], {"enabled": True})
             rendered = config.read_bytes()
             self.assertTrue(rendered.startswith(b'top = "keep"\n\n[agents]\nfuture_key = "keep"\n'))
@@ -343,42 +394,16 @@ class V02RuntimeTests(unittest.TestCase):
             self.assertEqual(destination_state(home, codex), state_before)
             self.assertEqual(tomllib.loads(config.read_text(encoding="utf-8")), parsed_before)
 
-    def test_managed_v012_upgrade_preserves_ledger_and_exact_rollback(self):
+    def test_pre_modern_managed_state_is_rejected_without_mutation(self):
         with tempfile.TemporaryDirectory() as temp:
             home, codex, env = isolated(temp)
-            legacy_config, legacy_ledger = seed_managed_legacy(home, codex)
-            legacy_state = destination_state(home, codex)
-            legacy_snapshot = codex / "agent-system/snapshots/snapshot-0123456789abcdef0123456789abcdef/manifest.json"
-            legacy_snapshot_bytes = legacy_snapshot.read_bytes()
-            legacy_snapshot_mode = stat.S_IMODE(legacy_snapshot.stat().st_mode)
-
-            before_check = destination_state(home, codex)
-            checked = json.loads(run("check", env=env).stdout)
-            self.assertTrue(checked["ok"])
-            self.assertEqual(checked["config_migration"], "remove_legacy_agents_enabled")
-            self.assertEqual(destination_state(home, codex), before_check)
-
-            upgraded = json.loads(run("install", env=env).stdout)
-            skill = home / ".agents/skills/govern-agent-system"
-            self.assertEqual([path.relative_to(skill).as_posix() for path in skill.rglob("*")], ["SKILL.md"])
-            self.assertFalse((skill / "scripts/agent_system.py").exists())
-            self.assertEqual((codex / "agent-system/ledger.jsonl").read_bytes(), legacy_ledger)
-            self.assertEqual(legacy_snapshot.read_bytes(), legacy_snapshot_bytes)
-            self.assertEqual(stat.S_IMODE(legacy_snapshot.stat().st_mode), legacy_snapshot_mode)
-            self.assertEqual((codex / "agents/user-owned-agent.toml").read_text(), 'name = "user-owned"\n')
-            parsed = tomllib.loads((codex / "config.toml").read_text(encoding="utf-8"))
-            self.assertEqual(parsed["top"], "preserved")
-            self.assertEqual(parsed["other"], {"flag": False})
-            self.assertEqual(parsed["agents"]["future_key"], "preserved")
-            self.assertNotIn("enabled", parsed["agents"])
-
-            rolled_back = json.loads(run("rollback", "--snapshot", upgraded["snapshot"], env=env).stdout)
-            self.assertTrue(rolled_back["ok"])
-            self.assertEqual(destination_state(home, codex), legacy_state)
-            self.assertEqual((codex / "config.toml").read_bytes(), legacy_config)
-            self.assertTrue(tomllib.loads((codex / "config.toml").read_text())["agents"]["enabled"])
-            self.assertEqual((codex / "agent-system/ledger.jsonl").read_bytes(), legacy_ledger)
-            self.assertEqual(legacy_snapshot.read_bytes(), legacy_snapshot_bytes)
+            seed_pre_modern_managed_state(home, codex)
+            before = destination_state(home, codex)
+            for command in ("check", "install", "uninstall"):
+                rejected = run(command, env=env, ok=False)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("unsupported managed installer version", rejected.stdout + rejected.stderr)
+                self.assertEqual(destination_state(home, codex), before)
 
     def test_unmanaged_agents_enabled_fails_closed_without_deleting_other_enabled_keys(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -395,63 +420,21 @@ class V02RuntimeTests(unittest.TestCase):
                 self.assertEqual(destination_state(home, codex), before)
                 self.assertEqual(config.read_bytes(), original)
 
-    def test_legacy_agents_enabled_value_requires_exact_managed_provenance(self):
-        with tempfile.TemporaryDirectory() as temp:
-            home, codex, env = isolated(temp)
-            seed_managed_legacy(home, codex)
-            config = codex / "config.toml"
-            config.write_text(config.read_text().replace("enabled = true", "enabled = false", 1))
-            manifest_path = codex / "agent-system/managed-install.json"
-            manifest = json.loads(manifest_path.read_text())
-            manifest["config"]["managed"]["enabled"] = False
-            manifest["config"]["managed_sha256"] = sha256(
-                json.dumps(manifest["config"]["managed"], sort_keys=True, separators=(",", ":")).encode("utf-8")
-            )
-            manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
-            config.chmod(0o600)
-            manifest_path.chmod(0o600)
-            before = destination_state(home, codex)
-            for command in ("check", "install"):
-                result = run(command, env=env, ok=False)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("provenance", (result.stdout + result.stderr).lower())
-                self.assertEqual(destination_state(home, codex), before)
-
-    def test_legacy_enabled_migration_accepts_only_released_managed_versions(self):
-        for version in ("0.1.0", "0.1.1", "0.1.2"):
-            with self.subTest(version=version), tempfile.TemporaryDirectory() as temp:
-                home, codex, env = isolated(temp)
-                seed_managed_legacy(home, codex, version)
-                before = destination_state(home, codex)
-                upgraded = json.loads(run("install", env=env).stdout)
-                self.assertNotIn("enabled", tomllib.loads((codex / "config.toml").read_text())["agents"])
-                self.assertTrue(json.loads(run("rollback", "--snapshot", upgraded["snapshot"], env=env).stdout)["ok"])
-                self.assertEqual(destination_state(home, codex), before)
-
-        for version in ("0.0.9", "0.1.99"):
-            with self.subTest(version=version), tempfile.TemporaryDirectory() as temp:
-                home, codex, env = isolated(temp)
-                seed_managed_legacy(home, codex, version)
-                before = destination_state(home, codex)
-                for command in ("check", "install"):
-                    result = run(command, env=env, ok=False)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("version", (result.stdout + result.stderr).lower())
-                    self.assertEqual(destination_state(home, codex), before)
-
     def test_public_documentation_keeps_v02_contracts_aligned(self):
         english = (ROOT / "README.md").read_text(encoding="utf-8")
         chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
         for text in (english, chinese):
             for literal in (
-                "0.2.1",
+                "0.2.3",
                 "python3 scripts/install.py check",
                 "python3 scripts/install.py install",
+                "python3 scripts/install.py uninstall",
                 "python3 scripts/install.py rollback --snapshot <snapshot-path>",
+                "uvx codex-agent-governance@latest install",
                 "CodeGraph",
                 "mechanical_luna",
                 "max_depth = 1",
-                "max_threads = 4",
+                "max_threads = 6",
             ):
                 self.assertIn(literal, text)
             for name, runtime in ROLE_MATRIX.items():
@@ -460,6 +443,27 @@ class V02RuntimeTests(unittest.TestCase):
             self.assertNotIn("enabled", config_example)
         self.assertIn("Upgrade an existing managed installation", english)
         self.assertIn("升级已安装的受管版本", chinese)
+
+    def test_publishable_python_cli_delegates_to_the_canonical_installer(self):
+        metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(
+            metadata["project"]["scripts"]["codex-agent-governance"],
+            "codex_agent_governance.cli:main",
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            home, codex, env = isolated(temp)
+            result = subprocess.run(
+                [sys.executable, "-m", "codex_agent_governance", "check"],
+                text=True,
+                capture_output=True,
+                env={**env, "PYTHONPATH": str(ROOT / "src")},
+                cwd=Path(temp),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertTrue(report["ok"])
+            self.assertEqual(report["release_version"], "0.2.3")
+            self.assertEqual(destination_state(home, codex), {})
 
 
 if __name__ == "__main__":

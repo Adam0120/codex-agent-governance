@@ -16,6 +16,17 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL = ROOT / "scripts" / "install.py"
 V020_FIXTURE = ROOT / "tests" / "fixtures" / "v0.2.0"
+V021_FIXTURE = ROOT / "tests" / "fixtures" / "v0.2.1"
+ROLE_NAMES = {
+    "default",
+    "worker",
+    "explorer",
+    "code_locator",
+    "cross_module_architect",
+    "systems_safety",
+    "semantic_reviewer",
+    "release_operator",
+}
 
 def canonical_root(path):
     return path.parent.resolve(strict=False) / path.name
@@ -69,22 +80,23 @@ def mode_byte_state(root):
 def sha256_bytes(raw):
     return hashlib.sha256(raw).hexdigest()
 
-def seed_managed_v020(home, codex, config_bytes=b"[agents]\nmax_threads = 4\nmax_depth = 1\n"):
-    release = json.loads((V020_FIXTURE / "release.json").read_text(encoding="utf-8"))
-    if release["source_revision"] != "def07224be678695090359b355e40f033f419041":
-        raise AssertionError("v0.2.0 fixture revision drift")
+def seed_managed_v02(home, codex, fixture, expected_revision, config_bytes):
+    release = json.loads((fixture / "release.json").read_text(encoding="utf-8"))
+    version = release["installer_version"]
+    if release["source_revision"] != expected_revision:
+        raise AssertionError(f"v{version} fixture revision drift")
 
-    skill_raw = (V020_FIXTURE / "SKILL.md").read_bytes()
+    skill_raw = (fixture / "SKILL.md").read_bytes()
     if sha256_bytes(skill_raw) != release["skill"]["file_sha256"]:
-        raise AssertionError("v0.2.0 Skill fixture hash mismatch")
+        raise AssertionError(f"v{version} Skill fixture hash mismatch")
     skill_tree_sha256 = sha256_bytes(b"F\0SKILL.md\0" + hashlib.sha256(skill_raw).digest())
     if skill_tree_sha256 != release["skill"]["tree_sha256"]:
-        raise AssertionError("v0.2.0 Skill tree hash mismatch")
+        raise AssertionError(f"v{version} Skill tree hash mismatch")
 
-    fixture_agents = V020_FIXTURE / "agents"
+    fixture_agents = fixture / "agents"
     actual_roles = {path.stem for path in fixture_agents.glob("*.toml")}
     if actual_roles != set(release["adapters"]):
-        raise AssertionError("v0.2.0 adapter fixture inventory mismatch")
+        raise AssertionError(f"v{version} adapter fixture inventory mismatch")
     skill = home / ".agents/skills/govern-agent-system"
     agents = codex / "agents"
     state = codex / "agent-system"
@@ -97,7 +109,7 @@ def seed_managed_v020(home, codex, config_bytes=b"[agents]\nmax_threads = 4\nmax
     for name, expected_sha256 in release["adapters"].items():
         raw = (fixture_agents / f"{name}.toml").read_bytes()
         if sha256_bytes(raw) != expected_sha256:
-            raise AssertionError(f"v0.2.0 adapter fixture hash mismatch: {name}")
+            raise AssertionError(f"v{version} adapter fixture hash mismatch: {name}")
         destination = agents / f"{name}.toml"
         destination.write_bytes(raw)
         adapter_records[name] = {"path": str(destination), "sha256": expected_sha256}
@@ -105,10 +117,10 @@ def seed_managed_v020(home, codex, config_bytes=b"[agents]\nmax_threads = 4\nmax
     managed = release["config"]["managed"]
     managed_sha256 = sha256_bytes(json.dumps(managed, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     if managed_sha256 != release["config"]["managed_sha256"]:
-        raise AssertionError("v0.2.0 managed config fixture hash mismatch")
+        raise AssertionError(f"v{version} managed config fixture hash mismatch")
     parsed_config = tomllib.loads(config_bytes.decode("utf-8"))
     if not isinstance(parsed_config.get("agents"), dict) or any(parsed_config["agents"].get(key) != value for key, value in managed.items()):
-        raise AssertionError("v0.2.0 fixture config lacks managed values")
+        raise AssertionError(f"v{version} fixture config lacks managed values")
     config = codex / "config.toml"
     config.write_bytes(config_bytes)
 
@@ -156,7 +168,111 @@ def seed_managed_v020(home, codex, config_bytes=b"[agents]\nmax_threads = 4\nmax
         path.chmod(0o600)
     return snapshot
 
+def seed_managed_v020(home, codex, config_bytes=b"[agents]\nmax_threads = 4\nmax_depth = 1\n"):
+    return seed_managed_v02(
+        home,
+        codex,
+        V020_FIXTURE,
+        "def07224be678695090359b355e40f033f419041",
+        config_bytes,
+    )
+
+def seed_managed_v021(home, codex, config_bytes=b"[agents]\nmax_threads = 4\nmax_depth = 1\n"):
+    return seed_managed_v02(
+        home,
+        codex,
+        V021_FIXTURE,
+        "c9ea1cd979367ae218580fd52566716753cd5800",
+        config_bytes,
+    )
+
 class GovernanceTests(unittest.TestCase):
+    def test_snapshot_sync_fences_journal_and_destination_promotion(self):
+        spec = util.spec_from_file_location("governance_installer_snapshot_sync_test", INSTALL)
+        installer = util.module_from_spec(spec); sys.path.insert(0, str(INSTALL.parent))
+        try:
+            spec.loader.exec_module(installer)
+        finally:
+            sys.path.pop(0)
+
+        with tempfile.TemporaryDirectory() as temp:
+            home, codex, env = isolated(temp)
+            codex.mkdir()
+            config = codex / "config.toml"
+            config.write_bytes(b"[other]\nkeep = true\n")
+            before = state_bytes(home, codex)
+            snapshot_root = codex / "agent-system" / "snapshots"
+
+            def fail_snapshot_sync(path):
+                if path.parent == snapshot_root and path.name.startswith("snapshot-"):
+                    raise installer.InstallError("injected snapshot sync failure")
+                return real_fsync_directory(path)
+
+            real_fsync_directory = installer.fsync_directory
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(installer, "fsync_directory", side_effect=fail_snapshot_sync):
+                with self.assertRaisesRegex(installer.InstallError, "injected snapshot sync failure"):
+                    installer.install()
+
+            self.assertEqual(state_bytes(home, codex), before)
+            self.assertFalse((codex / "agent-system" / "rollback-journal.json").exists())
+            self.assertEqual(config.read_bytes(), b"[other]\nkeep = true\n")
+            self.assertFalse((home / ".agents" / "skills" / "govern-agent-system").exists())
+
+        with tempfile.TemporaryDirectory() as temp:
+            home, codex, env = isolated(temp)
+            codex.mkdir()
+            (codex / "config.toml").write_bytes(b"[other]\nkeep = true\n")
+            p = {
+                "state": codex / "agent-system",
+                "snapshots": codex / "agent-system" / "snapshots",
+                "skill": home / ".agents" / "skills" / "govern-agent-system",
+                "config": codex / "config.toml",
+                "manifest": codex / "agent-system" / "managed-install.json",
+                "agents": codex / "agents",
+            }
+            synced_directories = []
+            synced_files = []
+            promoted = []
+            real_fsync_directory = installer.fsync_directory
+            real_fsync_file = installer.fsync_file
+            real_replace = installer.os.replace
+            destinations = {
+                p["skill"], p["config"], p["manifest"],
+                *(p["agents"] / f"{name}.toml" for name in ROLE_NAMES),
+            }
+
+            def record_sync(path):
+                synced_directories.append(path)
+                return real_fsync_directory(path)
+
+            def record_file_sync(path):
+                synced_files.append(path)
+                return real_fsync_file(path)
+
+            def require_snapshot_sync(source, destination):
+                if Path(destination) in destinations:
+                    snapshot_files = {
+                        path
+                        for snapshot in p["snapshots"].glob("snapshot-*")
+                        for path in snapshot.rglob("*")
+                        if path.is_file()
+                    }
+                    self.assertTrue(snapshot_files)
+                    self.assertTrue(snapshot_files.issubset(synced_files))
+                    self.assertIn(p["snapshots"], synced_directories)
+                    self.assertIn(p["state"], synced_directories)
+                    promoted.append(Path(destination))
+                return real_replace(source, destination)
+
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(installer, "fsync_directory", side_effect=record_sync), \
+                 mock.patch.object(installer, "fsync_file", side_effect=record_file_sync), \
+                 mock.patch.object(installer.os, "replace", side_effect=require_snapshot_sync):
+                self.assertTrue(installer.install()["ok"])
+
+            self.assertEqual(set(promoted), destinations)
+
     def test_installer_collision_update_and_rollback(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / "home"; codex = Path(temp) / "codex"; target = home / ".agents" / "skills" / "govern-agent-system"; target.mkdir(parents=True); (target / "foreign").write_text("x")
@@ -175,7 +291,7 @@ class GovernanceTests(unittest.TestCase):
             report = json.loads(failed.stdout); self.assertFalse(report["ok"]); self.assertTrue(report["recovery"]); self.assertTrue(Path(report["snapshot"]).is_dir())
             self.assertEqual(config.read_bytes(), b"[other]\nkeep = true\n"); self.assertEqual(list(agents.iterdir()), [])
             self.assertFalse((home / ".agents" / "skills" / "govern-agent-system").exists())
-            lock = codex / "agent-system" / "install.lock"; lock.parent.mkdir(parents=True, exist_ok=True); lock.write_text("999999\n")
+            lock = codex / "agent-system" / "install.lock"; lock.parent.mkdir(parents=True, exist_ok=True); lock.write_text(f"{os.getpid()}\n")
             before = config.read_bytes(); locked = run(INSTALL, "install", env={k:v for k,v in env.items() if k != "CAG_FAIL_AFTER_SKILL"}, ok=False)
             self.assertIn("INSTALL_LOCKED", locked.stderr); self.assertEqual(before, config.read_bytes())
             lock.unlink(); success = json.loads(run(INSTALL, "install", env={k:v for k,v in env.items() if k != "CAG_FAIL_AFTER_SKILL"}).stdout)
@@ -259,7 +375,14 @@ class GovernanceTests(unittest.TestCase):
             ordinary = run(INSTALL, "rollback", "--snapshot", report["recovery_snapshot"], env=env, ok=False)
             self.assertIn("RECOVERY_REQUIRED", ordinary.stderr)
             retry = run(INSTALL, "rollback", "--recover", "--snapshot", report["recovery_snapshot"], env={**env, "CAG_FAIL_ROLLBACK_AFTER":"1"}, ok=False)
-            self.assertFalse(json.loads(retry.stdout)["recovery"]); self.assertEqual(journal.read_bytes(), original_journal); self.assertEqual(adapter.read_bytes(), b"corrupted pre-retry adapter\n")
+            retry_report = json.loads(retry.stdout)
+            retry_journal = json.loads(journal.read_text(encoding="utf-8"))
+            self.assertFalse(retry_report["recovery"])
+            self.assertEqual(retry_journal["status"], "recovery_failed")
+            self.assertEqual(retry_journal["recovery_snapshot"], report["recovery_snapshot"])
+            self.assertIn("artifacts", retry_journal)
+            self.assertNotEqual(journal.read_bytes(), original_journal)
+            self.assertEqual(adapter.read_bytes(), b"corrupted pre-retry adapter\n")
             recovered = json.loads(run(INSTALL, "rollback", "--recover", "--snapshot", report["recovery_snapshot"], env=env).stdout)
             self.assertTrue(recovered["ok"]); self.assertFalse(journal.exists()); self.assertEqual(adapter.read_bytes(), good_adapter); self.assertTrue(json.loads(run(INSTALL, "install", env=env).stdout)["ok"])
     def test_installer_rechecks_recovery_fence_under_lock(self):
@@ -330,18 +453,326 @@ class GovernanceTests(unittest.TestCase):
             manifest = json.loads((codex / "agent-system/managed-install.json").read_text())
             installed_runtime = tomllib.loads(installed_agent.read_text())
             self.assertTrue(updated["ok"])
-            self.assertEqual(manifest["installer_version"], "0.2.1")
+            self.assertEqual(manifest["installer_version"], "0.2.3")
+            self.assertEqual(manifest["config"]["managed"], {"max_threads": 6, "max_depth": 1})
+            self.assertEqual(tomllib.loads((codex / "config.toml").read_text())["agents"], {"max_threads": 6, "max_depth": 1})
             self.assertIn("Use one child by default.", (target / "SKILL.md").read_text(encoding="utf-8"))
-            self.assertEqual(
-                (installed_runtime["model"], installed_runtime["model_reasoning_effort"]),
-                ("gpt-5.6-terra", "medium"),
-            )
+            self.assertEqual(installed_runtime["model"], "gpt-5.6-luna")
+            self.assertEqual(installed_runtime["model_reasoning_effort"], "high")
             self.assertNotEqual(installed_agent.read_bytes(), before_agent)
             self.assertEqual(mode_byte_state(old_snapshot), old_snapshot_state)
             self.assertTrue(json.loads(run(INSTALL, "rollback", "--snapshot", updated["snapshot"], env=env).stdout)["ok"])
             self.assertEqual(installed_agent.read_bytes(), before_agent)
             self.assertEqual(state_bytes(home, codex), before)
             self.assertEqual(mode_byte_state(old_snapshot), old_snapshot_state)
+    def test_pinned_v021_update_replaces_roles_and_rolls_back_exactly(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home, codex, env = isolated(temp)
+            old_snapshot = seed_managed_v021(home, codex)
+            old_snapshot_state = mode_byte_state(old_snapshot)
+            before = state_bytes(home, codex)
+            installed_agent = codex / "agents/default.toml"
+            before_agent = installed_agent.read_bytes()
+            updated = json.loads(run(INSTALL, "install", env=env).stdout)
+            manifest = json.loads((codex / "agent-system/managed-install.json").read_text())
+            installed_runtime = tomllib.loads(installed_agent.read_text())
+            self.assertTrue(updated["ok"])
+            self.assertEqual(manifest["installer_version"], "0.2.3")
+            self.assertEqual(manifest["config"]["managed"], {"max_threads": 6, "max_depth": 1})
+            self.assertEqual(tomllib.loads((codex / "config.toml").read_text())["agents"], {"max_threads": 6, "max_depth": 1})
+            self.assertEqual(installed_runtime["model"], "gpt-5.6-luna")
+            self.assertEqual(installed_runtime["model_reasoning_effort"], "high")
+            self.assertNotEqual(installed_agent.read_bytes(), before_agent)
+            self.assertEqual(mode_byte_state(old_snapshot), old_snapshot_state)
+            self.assertTrue(json.loads(run(INSTALL, "rollback", "--snapshot", updated["snapshot"], env=env).stdout)["ok"])
+            self.assertEqual(installed_agent.read_bytes(), before_agent)
+            self.assertEqual(state_bytes(home, codex), before)
+            self.assertEqual(mode_byte_state(old_snapshot), old_snapshot_state)
+    def test_higher_version_same_format_updates_without_version_gate(self):
+        def seed_future_managed_state(
+            home,
+            codex,
+            config_text="[agents]\nmax_threads = 8\nmax_depth = 1\n",
+        ):
+            seed_managed_v021(home, codex)
+            config_path = codex / "config.toml"
+            config_path.write_text(config_text, encoding="utf-8")
+            managed = {"max_threads": 8, "max_depth": 1}
+            manifest_path = codex / "agent-system/managed-install.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["installer_version"] = "999.999.999"
+            manifest["config"]["managed"] = managed
+            manifest["config"]["managed_sha256"] = sha256_bytes(
+                json.dumps(managed, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            )
+            manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+            manifest_path.chmod(0o600)
+            return manifest_path
+
+        compatible_renderings = (
+            "[agents]\nmax_threads = 8\nmax_depth = 1\n",
+            '["agents"]\nmax_threads = 8\nmax_depth = 1\n',
+            "[agents]\n\"max_threads\" = 8\n'max_depth' = 1\n",
+        )
+        for config_text in compatible_renderings:
+            with self.subTest(config_text=config_text), tempfile.TemporaryDirectory() as temp:
+                home, codex, env = isolated(temp)
+                manifest_path = seed_future_managed_state(home, codex, config_text)
+                checked = json.loads(run(INSTALL, "check", env=env).stdout)
+                updated = json.loads(run(INSTALL, "install", env=env).stdout)
+                installed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                self.assertTrue(checked["ok"] and checked["managed"])
+                self.assertTrue(updated["ok"])
+                self.assertEqual(installed_manifest["installer_version"], "0.2.3")
+                self.assertEqual(installed_manifest["config"]["managed"], {"max_threads": 6, "max_depth": 1})
+                self.assertEqual(tomllib.loads((codex / "config.toml").read_text())["agents"], {"max_threads": 6, "max_depth": 1})
+
+        with tempfile.TemporaryDirectory() as temp:
+            home, codex, env = isolated(temp)
+            manifest_path = seed_future_managed_state(home, codex)
+            removed = json.loads(run(INSTALL, "uninstall", env=env).stdout)
+            self.assertTrue(removed["ok"])
+            self.assertFalse(manifest_path.exists())
+            self.assertEqual(tomllib.loads((codex / "config.toml").read_text())["agents"], {})
+
+    def test_manifest_schema_and_managed_provenance_require_exact_scalar_types(self):
+        cases = (
+            ("boolean schema", True, None),
+            ("floating managed values", 1, {"max_threads": 4.0, "max_depth": 1.0}),
+            ("boolean managed value", 1, {"max_threads": 4, "max_depth": True}),
+        )
+        for label, schema_version, managed_values in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
+                home, codex, env = isolated(temp)
+                seed_managed_v021(home, codex)
+                manifest_path = codex / "agent-system/managed-install.json"
+                config_path = codex / "config.toml"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["schema_version"] = schema_version
+                if managed_values is not None:
+                    manifest["config"]["managed"] = managed_values
+                    manifest["config"]["managed_sha256"] = sha256_bytes(
+                        json.dumps(managed_values, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                    )
+                    if isinstance(managed_values["max_depth"], bool):
+                        config_path.write_text("[agents]\nmax_threads = 4\nmax_depth = true\n", encoding="utf-8")
+                    else:
+                        config_path.write_text("[agents]\nmax_threads = 4.0\nmax_depth = 1.0\n", encoding="utf-8")
+                manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+                before = state_bytes(home, codex)
+
+                checked = run(INSTALL, "check", env=env, ok=False)
+                installed = run(INSTALL, "install", env=env, ok=False)
+
+                self.assertNotEqual(checked.returncode, 0)
+                self.assertIn("managed", checked.stdout + checked.stderr)
+                self.assertNotEqual(installed.returncode, 0)
+                self.assertEqual(state_bytes(home, codex), before)
+
+    @unittest.skipIf(os.name == "nt", "forced KeyboardInterrupt exit codes are platform-specific")
+    def test_interrupted_install_and_uninstall_are_fenced_and_exactly_recoverable(self):
+        step_count = len(ROLE_NAMES) + 3
+        install_boundaries = [(index, "destination") for index in range(1, step_count + 1)] + [(len(ROLE_NAMES) + 2, "backup")]
+        uninstall_boundaries = [(index, "backup") for index in range(1, step_count + 1)] + [(len(ROLE_NAMES) + 2, "destination")]
+
+        for operation, boundaries in (("install", install_boundaries), ("uninstall", uninstall_boundaries)):
+            for index, phase in boundaries:
+                with self.subTest(operation=operation, index=index, phase=phase), tempfile.TemporaryDirectory() as temp:
+                    home, codex, env = isolated(temp)
+                    codex.mkdir()
+                    (codex / "config.toml").write_text("[other]\nkeep = true\n", encoding="utf-8")
+                    if operation == "uninstall":
+                        self.assertTrue(json.loads(run(INSTALL, "install", env=env).stdout)["ok"])
+                    before = state_bytes(home, codex)
+                    interrupted = run(
+                        INSTALL,
+                        operation,
+                        env={**env, f"CAG_INTERRUPT_{operation.upper()}_AFTER": f"{index}:{phase}"},
+                        ok=False,
+                    )
+                    self.assertNotEqual(interrupted.returncode, 0)
+
+                    journal_path = codex / "agent-system/rollback-journal.json"
+                    lock_path = codex / "agent-system/install.lock"
+                    self.assertTrue(journal_path.is_file())
+                    self.assertFalse(lock_path.exists())
+                    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+                    self.assertEqual(journal["status"], "promoting")
+                    self.assertIsNone(journal["error"])
+                    self.assertEqual(len(journal["steps"]), step_count)
+
+                    fenced = run(INSTALL, "install", env=env, ok=False)
+                    self.assertIn("RECOVERY_REQUIRED", fenced.stderr)
+                    recovered = json.loads(
+                        run(
+                            INSTALL,
+                            "rollback",
+                            "--recover",
+                            "--snapshot",
+                            journal["recovery_snapshot"],
+                            env=env,
+                        ).stdout
+                    )
+                    self.assertTrue(recovered["ok"])
+                    self.assertEqual(state_bytes(home, codex), before)
+                    self.assertFalse(journal_path.exists())
+                    debris = [
+                        path
+                        for root in (home, codex)
+                        if root.exists()
+                        for path in root.rglob("*")
+                        if ".backup-" in path.name or path.name.startswith(".govern-agent-system.")
+                    ]
+                    self.assertEqual(debris, [])
+
+    def test_process_death_leaves_a_durable_recoverable_transaction(self):
+        cases = (("install", "1:destination"), ("uninstall", "1:backup"))
+        for operation, boundary in cases:
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as temp:
+                home, codex, env = isolated(temp)
+                codex.mkdir()
+                (codex / "config.toml").write_text("[other]\nkeep = true\n", encoding="utf-8")
+                if operation == "uninstall":
+                    self.assertTrue(json.loads(run(INSTALL, "install", env=env).stdout)["ok"])
+                before = state_bytes(home, codex)
+
+                terminated = run(
+                    INSTALL,
+                    operation,
+                    env={**env, f"CAG_TERMINATE_{operation.upper()}_AFTER": boundary},
+                    ok=False,
+                )
+                self.assertEqual(terminated.returncode, 86)
+                journal_path = codex / "agent-system/rollback-journal.json"
+                lock_path = codex / "agent-system/install.lock"
+                self.assertTrue(journal_path.is_file())
+                self.assertTrue(lock_path.is_file())
+                journal = json.loads(journal_path.read_text(encoding="utf-8"))
+                self.assertEqual(journal["status"], "promoting")
+                self.assertIsNone(journal["error"])
+
+                fenced = run(INSTALL, "install", env=env, ok=False)
+                self.assertIn("RECOVERY_REQUIRED", fenced.stderr)
+                recovered = json.loads(
+                    run(
+                        INSTALL,
+                        "rollback",
+                        "--recover",
+                        "--snapshot",
+                        journal["recovery_snapshot"],
+                        env=env,
+                    ).stdout
+                )
+                self.assertTrue(recovered["ok"])
+                self.assertEqual(state_bytes(home, codex), before)
+                self.assertFalse(journal_path.exists())
+                self.assertFalse(lock_path.exists())
+                debris = [
+                    path
+                    for root in (home, codex)
+                    if root.exists()
+                    for path in root.rglob("*")
+                    if ".backup-" in path.name or path.name.startswith(".govern-agent-system.")
+                ]
+                self.assertEqual(debris, [])
+
+    def test_dead_owner_lock_without_a_journal_is_reclaimed_at_transaction_edges(self):
+        cases = (
+            ("before journal", "CAG_TERMINATE_INSTALL_BEFORE_JOURNAL", 87, False),
+            ("after journal close", "CAG_TERMINATE_INSTALL_AFTER_JOURNAL_CLOSE", 88, True),
+        )
+        for label, variable, exit_code, committed in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
+                home, codex, env = isolated(temp)
+                codex.mkdir()
+                config = codex / "config.toml"
+                config.write_text("[other]\nkeep = true\n", encoding="utf-8")
+                before = state_bytes(home, codex)
+
+                terminated = run(INSTALL, "install", env={**env, variable: "1"}, ok=False)
+                self.assertEqual(terminated.returncode, exit_code)
+                lock_path = codex / "agent-system/install.lock"
+                journal_path = codex / "agent-system/rollback-journal.json"
+                self.assertTrue(lock_path.is_file())
+                self.assertFalse(journal_path.exists())
+                if committed:
+                    self.assertNotEqual(state_bytes(home, codex), before)
+                    self.assertTrue(json.loads(run(INSTALL, "check", env=env).stdout)["managed"])
+                else:
+                    self.assertEqual(config.read_text(encoding="utf-8"), "[other]\nkeep = true\n")
+                    self.assertFalse((home / ".agents/skills/govern-agent-system").exists())
+                    self.assertFalse((codex / "agent-system/managed-install.json").exists())
+
+                resumed = json.loads(run(INSTALL, "install", env=env).stdout)
+                self.assertTrue(resumed["ok"])
+                self.assertFalse(lock_path.exists())
+                self.assertFalse(journal_path.exists())
+                self.assertTrue(json.loads(run(INSTALL, "check", env=env).stdout)["managed"])
+                debris = [
+                    path
+                    for root in (home, codex)
+                    if root.exists()
+                    for path in root.rglob("*")
+                    if path.name.startswith(".govern-agent-system.")
+                ]
+                self.assertEqual(debris, [])
+
+    def test_uninstall_preserves_user_state_and_rollback_restores_managed_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home, codex, env = isolated(temp)
+            codex.mkdir()
+            config = codex / "config.toml"
+            config.write_bytes(
+                b'top = "keep"\n\n[agents]\nfuture_key = "keep"\n\n[mcp]\nendpoint = "keep"\n'
+            )
+            installed = json.loads(run(INSTALL, "install", env=env).stdout)
+            user_agent = codex / "agents/user-owned-agent.toml"
+            user_agent.write_text('name = "user-owned"\n', encoding="utf-8")
+            before_uninstall = state_bytes(home, codex)
+
+            removed = json.loads(run(INSTALL, "uninstall", env=env).stdout)
+            snapshot = Path(removed["snapshot"])
+            snapshot_manifest = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))
+            parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+
+            self.assertTrue(installed["ok"] and removed["ok"])
+            self.assertEqual(snapshot_manifest["purpose"], "uninstall")
+            self.assertFalse((home / ".agents/skills/govern-agent-system").exists())
+            self.assertFalse((codex / "agent-system/managed-install.json").exists())
+            self.assertFalse(any((codex / "agents" / f"{name}.toml").exists() for name in ROLE_NAMES))
+            self.assertEqual(user_agent.read_text(encoding="utf-8"), 'name = "user-owned"\n')
+            self.assertEqual(parsed["agents"], {"future_key": "keep"})
+            self.assertEqual(parsed["mcp"], {"endpoint": "keep"})
+            checked = json.loads(run(INSTALL, "check", env=env).stdout)
+            self.assertTrue(checked["ok"])
+            self.assertFalse(checked["managed"])
+
+            restored = json.loads(run(INSTALL, "rollback", "--snapshot", removed["snapshot"], env=env).stdout)
+            self.assertTrue(restored["ok"])
+            self.assertEqual(state_bytes(home, codex), before_uninstall)
+
+    def test_uninstall_failure_recovers_and_unmanaged_uninstall_is_read_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home, codex, env = isolated(temp)
+            codex.mkdir()
+            (codex / "config.toml").write_text('[other]\nkeep = true\n', encoding="utf-8")
+            before_unmanaged = state_bytes(home, codex)
+            rejected = run(INSTALL, "uninstall", env=env, ok=False)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("NOT_MANAGED", rejected.stdout + rejected.stderr)
+            self.assertEqual(state_bytes(home, codex), before_unmanaged)
+
+        for failure_index in range(1, len(ROLE_NAMES) + 4):
+            with self.subTest(failure_index=failure_index), tempfile.TemporaryDirectory() as temp:
+                home, codex, env = isolated(temp)
+                self.assertTrue(json.loads(run(INSTALL, "install", env=env).stdout)["ok"])
+                before_failure = state_bytes(home, codex)
+                failed_env = {**env, "CAG_FAIL_UNINSTALL_AFTER": str(failure_index)}
+                failed = run(INSTALL, "uninstall", env=failed_env, ok=False)
+                result = json.loads(failed.stdout)
+                self.assertFalse(result["ok"])
+                self.assertTrue(result["recovery"])
+                self.assertEqual(state_bytes(home, codex), before_failure)
     def test_pinned_v020_update_preserves_unknown_config_and_mcp(self):
         with tempfile.TemporaryDirectory() as temp:
             home, codex, env = isolated(temp)
@@ -355,7 +786,10 @@ class GovernanceTests(unittest.TestCase):
             installed_config = config.read_bytes()
             installed_state = state_bytes(home, codex)
             updated = json.loads(run(INSTALL, "install", env=env).stdout)
-            self.assertEqual(config.read_bytes(), installed_config)
+            self.assertEqual(
+                tomllib.loads(config.read_text(encoding="utf-8"))["agents"],
+                {"future_key": "preserved", "max_threads": 6, "max_depth": 1},
+            )
             restored = json.loads(run(INSTALL, "rollback", "--snapshot", updated["snapshot"], env=env).stdout)
             self.assertTrue(updated["ok"] and restored["ok"])
             self.assertFalse(updated["mcp_touched"]); self.assertFalse(restored["mcp_touched"])
@@ -363,19 +797,19 @@ class GovernanceTests(unittest.TestCase):
             self.assertEqual(mcp_config.read_bytes(), before)
             self.assertEqual(state_bytes(home, codex), installed_state)
     @unittest.skipIf(os.name == "nt", "POSIX modes are not Windows ACL guarantees")
-    def test_snapshot_permissions_diagnose_and_remediate_legacy_state(self):
+    def test_snapshot_permissions_diagnose_and_remediate_existing_state(self):
         with tempfile.TemporaryDirectory() as temp:
             home, codex, env = isolated(temp); codex.mkdir(mode=0o755)
             config = codex / "config.toml"; baseline = b"[other]\nkeep = true\n"; config.write_bytes(baseline); config.chmod(0o644)
             mcp_config = codex / "mcp.toml"; mcp_before = b"[mcp]\nendpoint = 'unchanged'\n"; mcp_config.write_bytes(mcp_before)
             first = json.loads(run(INSTALL, "install", env=env).stdout)
-            state = codex / "agent-system"; snapshots = state / "snapshots"; legacy = Path(first["snapshot"])
-            for path in [state, snapshots, legacy, *legacy.rglob("*")]:
+            state = codex / "agent-system"; snapshots = state / "snapshots"; existing = Path(first["snapshot"])
+            for path in [state, snapshots, existing, *existing.rglob("*")]:
                 if path.is_dir(): path.chmod(0o755)
                 elif path.is_file(): path.chmod(0o644)
-            before_modes = {str(path): stat.S_IMODE(path.lstat().st_mode) for path in [state, snapshots, legacy, *legacy.rglob("*")]}
+            before_modes = {str(path): stat.S_IMODE(path.lstat().st_mode) for path in [state, snapshots, existing, *existing.rglob("*")]}
             diagnosis = json.loads(run(INSTALL, "check", env=env).stdout)
-            self.assertTrue(diagnosis["permission_problems"]); self.assertEqual(before_modes, {str(path): stat.S_IMODE(path.lstat().st_mode) for path in [state, snapshots, legacy, *legacy.rglob("*")]})
+            self.assertTrue(diagnosis["permission_problems"]); self.assertEqual(before_modes, {str(path): stat.S_IMODE(path.lstat().st_mode) for path in [state, snapshots, existing, *existing.rglob("*")]})
             self.assertTrue(json.loads(run(INSTALL, "install", env=env).stdout)["ok"])
             checked = json.loads(run(INSTALL, "check", env=env).stdout); self.assertEqual(checked["permission_problems"], [])
             for path in [state, snapshots, *snapshots.rglob("*")]:
@@ -393,7 +827,7 @@ class GovernanceTests(unittest.TestCase):
             before = state_bytes(home, codex); blocked = run(INSTALL, "install", env=env, ok=False)
             self.assertIn("invalid snapshot manifest path", blocked.stderr); self.assertEqual(state_bytes(home, codex), before); self.assertEqual(outside.read_text(), "foreign\n")
     @unittest.skipIf(os.name == "nt", "POSIX modes are not Windows ACL guarantees")
-    def test_legacy_ledger_upgrade_and_lock_failure_permission_boundary(self):
+    def test_inert_ledger_update_and_lock_failure_permission_boundary(self):
         with tempfile.TemporaryDirectory() as temp:
             home, codex, env = isolated(temp); json.loads(run(INSTALL, "install", env=env).stdout)
             state = codex / "agent-system"; ledger = state / "ledger.jsonl"
@@ -492,12 +926,24 @@ class GovernanceTests(unittest.TestCase):
                 home, codex, env = isolated(temp); config = codex / "config.toml"; config.parent.mkdir(parents=True); config.write_text('[agents]\nfuture_key = "keep"\ninterrupt_message = false\n')
                 self.assertTrue(json.loads(run(INSTALL, "install", env={**env, "PYTHONHASHSEED":seed}).stdout)["ok"])
                 rendered.append(config.read_bytes())
-                self.assertEqual(tomllib.loads(config.read_text())["agents"], {"future_key":"keep", "interrupt_message":False, "max_depth":1, "max_threads":4})
+                self.assertEqual(tomllib.loads(config.read_text())["agents"], {"future_key":"keep", "interrupt_message":False, "max_depth":1, "max_threads":6})
         self.assertEqual(len(set(rendered)), 1)
         frontmatter = (ROOT / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[1]
         self.assertIn("\nname: govern-agent-system\n", "\n" + frontmatter)
         self.assertIn("Automatically govern native Codex custom-agent delegation", frontmatter)
         self.assertIn("Load before spawning or reusing agents", frontmatter)
+        self.assertNotIn("verified parent", frontmatter)
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Native delegation is an optimization, not a prerequisite", skill)
+        self.assertIn("missing optional delegation capability is never by itself `STOP`, a goal blocker", skill)
+        self.assertIn("The main agent holds the writer lease until it explicitly grants", skill)
+        self.assertIn("If a native spawn returns `unknown agent_type`", skill)
+        self.assertIn("Do not retry the same unavailable role in that task", skill)
+        self.assertIn("an already-running task may retain its prior role set", skill)
+        self.assertIn("Some task surfaces expose native `spawn_agent` but omit its `agent_type` parameter", skill)
+        self.assertIn("profile compatibility mode", skill)
+        self.assertIn("does **not** load the TOML sandbox or developer profile", skill)
+        self.assertIn("do not emit user-facing dispatch or model-binding logs", skill)
         self.assertIn("$govern-agent-system", (ROOT / "agents/openai.yaml").read_text())
         with tempfile.TemporaryDirectory() as temp:
             home, codex, env = isolated(temp); result = json.loads(run(INSTALL, "install", env=env).stdout)
@@ -525,6 +971,26 @@ class GovernanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             home, codex, env = isolated(temp)
             self.assertEqual(json.loads(run(INSTALL, "check", env=env).stdout)["release_version"], expected)
+
+    @unittest.skipIf(os.name == "nt", "POSIX hard-link payload behavior")
+    def test_packaged_payload_accepts_uv_cache_hardlinks_but_rejects_symlinks(self):
+        spec = util.spec_from_file_location("governance_installer_payload_link_test", INSTALL)
+        installer = util.module_from_spec(spec); sys.path.insert(0, str(INSTALL.parent))
+        try:
+            spec.loader.exec_module(installer)
+        finally:
+            sys.path.pop(0)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "payload.toml"
+            alias = root / "cache-alias.toml"
+            linked = root / "payload-link.toml"
+            source.write_bytes(b'name = "payload"\n')
+            os.link(source, alias)
+            self.assertEqual(installer.packaged_file(source), b'name = "payload"\n')
+            linked.symlink_to(source)
+            with self.assertRaises(installer.InstallError):
+                installer.packaged_file(linked)
     def test_public_runtime_has_no_controller_interface(self):
         self.assertFalse((ROOT / "scripts/agent_system.py").exists())
         runtime = (ROOT / "SKILL.md").read_text(encoding="utf-8") + "\n".join(

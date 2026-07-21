@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely install, inspect, snapshot, or roll back govern-agent-system."""
+"""Safely install, inspect, uninstall, snapshot, or roll back govern-agent-system."""
 from __future__ import annotations
 
 import argparse
@@ -23,32 +23,40 @@ import managed_lock
 
 SOURCE = Path(os.path.abspath(__file__)).parents[1]
 IDENTITY = "govern-agent-system"
-INSTALL_VERSION = "0.2.1"
+INSTALL_VERSION = "0.2.3"
 MANIFEST_SCHEMA = 1
 SNAPSHOT_SCHEMA = 2
+SNAPSHOT_PURPOSES = {"install", "uninstall", "rollback-recovery"}
 ROLE_RUNTIME = {
-    "default": ("gpt-5.6-terra", "medium", "read-only"),
-    "worker": ("gpt-5.6-terra", "medium", "workspace-write"),
-    "explorer": ("gpt-5.6-terra", "medium", "read-only"),
+    "default": ("gpt-5.6-luna", "high", "read-only"),
+    "worker": ("gpt-5.6-luna", "high", "workspace-write"),
+    "explorer": ("gpt-5.6-luna", "high", "read-only"),
     "code_locator": ("gpt-5.3-codex-spark", "high", "read-only"),
     "cross_module_architect": ("gpt-5.6-terra", "medium", "read-only"),
     "systems_safety": ("gpt-5.6-terra", "medium", "workspace-write"),
     "semantic_reviewer": ("gpt-5.6-sol", "medium", "read-only"),
     "release_operator": ("gpt-5.6-terra", "medium", "workspace-write"),
 }
+ROLE_SANDBOX = {name: runtime[2] for name, runtime in ROLE_RUNTIME.items()}
 ROLE_NAMES = tuple(sorted(ROLE_RUNTIME))
 SKILL_SOURCE = SOURCE / "SKILL.md"
 ADAPTER_SOURCE = SOURCE / ".codex" / "agents"
 CONFIG_KEY_ORDER = ("max_threads", "max_depth")
-MANAGED_AGENTS = {"max_threads": 4, "max_depth": 1}
-LEGACY_MANAGED_AGENTS = {"enabled": True, "max_depth": 1, "max_threads": 4}
-LEGACY_INSTALL_VERSIONS = frozenset({"0.1.0", "0.1.1", "0.1.2"})
+MANAGED_AGENTS = {"max_threads": 6, "max_depth": 1}
+MANAGED_KEY_LINE = re.compile(
+    r'''^\s*(?P<key>max_depth|max_threads|"max_depth"|"max_threads"|'max_depth'|'max_threads')\s*='''
+)
+MIN_MODERN_INSTALL_VERSION = (0, 2, 0)
 SOURCE_IGNORED_PARTS = {".git", "__pycache__", ".pytest_cache", "build", "dist"}
 RUNTIME_IGNORED_PARTS = {"__pycache__", ".pytest_cache"}
 SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 SNAPSHOT_NAME = re.compile(r"^snapshot-[a-f0-9]{32}$")
+TRANSACTION_TOKEN = re.compile(r"^[a-f0-9]{32}$")
+STAGING_NAME = re.compile(r"^\.govern-agent-system\.[A-Za-z0-9_-]{6,64}$")
+JOURNAL_OPERATIONS = {"install", "uninstall", "rollback"}
+JOURNAL_STATUSES = {"promoting", "recovering", "recovery_failed", "recovered"}
 
 
 class InstallError(Exception):
@@ -463,6 +471,34 @@ def exact_keys(value: Any, required: set[str], context: str) -> dict[str, Any]:
     return value
 
 
+def exact_integer(value: Any, expected: int) -> bool:
+    """JSON booleans and floats must not impersonate integer schema values."""
+    return type(value) is int and value == expected
+
+
+def modern_format_compatible(installed: str) -> bool:
+    """Use the manifest schema and provenance as the gate, not version ordering."""
+    if not VERSION.fullmatch(installed):
+        return False
+    try:
+        installed_version = tuple(int(part) for part in installed.split("."))
+    except ValueError:
+        return False
+    return MIN_MODERN_INSTALL_VERSION <= installed_version
+
+
+def compatible_managed_agents(managed: Any) -> bool:
+    """Validate the stable v0.2 managed-config shape independently of release order."""
+    return (
+        isinstance(managed, dict)
+        and set(managed) == set(MANAGED_AGENTS)
+        and type(managed.get("max_threads")) is int
+        and managed["max_threads"] > 0
+        and type(managed.get("max_depth")) is int
+        and managed["max_depth"] >= 0
+    )
+
+
 def expected_destinations(p: dict[str, Path]) -> dict[str, str]:
     return {
         "agents": str(p["agents"]),
@@ -478,7 +514,7 @@ def validate_manifest_document(document: Any, p: dict[str, Path], *, verify_cont
         {"schema_version", "identity", "installer_version", "destinations", "link", "skill", "adapters", "config"},
         "managed manifest",
     )
-    if manifest["schema_version"] != MANIFEST_SCHEMA or manifest["identity"] != IDENTITY or not isinstance(manifest["installer_version"], str) or not VERSION.fullmatch(manifest["installer_version"]):
+    if not exact_integer(manifest["schema_version"], MANIFEST_SCHEMA) or manifest["identity"] != IDENTITY or not isinstance(manifest["installer_version"], str) or not VERSION.fullmatch(manifest["installer_version"]):
         raise InstallError("managed manifest identity or version mismatch")
     if exact_keys(manifest["destinations"], set(expected_destinations(p)), "manifest destinations") != expected_destinations(p):
         raise InstallError("managed manifest canonical destination mismatch")
@@ -503,15 +539,10 @@ def validate_manifest_document(document: Any, p: dict[str, Path], *, verify_cont
         raise InstallError("invalid managed config record")
     if not isinstance(config["managed_sha256"], str) or not SHA256.fullmatch(config["managed_sha256"]) or config["managed_sha256"] != managed_config_hash(config["managed"]):
         raise InstallError("invalid managed config hash")
-    version = tuple(int(part) for part in manifest["installer_version"].split("."))
-    if manifest["installer_version"] in LEGACY_INSTALL_VERSIONS:
-        expected_managed = LEGACY_MANAGED_AGENTS
-    elif version >= (0, 2, 0):
-        expected_managed = MANAGED_AGENTS
-    else:
+    if not modern_format_compatible(manifest["installer_version"]):
         raise InstallError("unsupported managed installer version")
-    if config["managed"] != expected_managed:
-        raise InstallError("managed config provenance does not match installer version")
+    if not compatible_managed_agents(config["managed"]):
+        raise InstallError("managed config is incompatible with the current manifest format")
     if not verify_content:
         return manifest
     if manifest["link"]:
@@ -561,7 +592,6 @@ def packaged_file(path: Path) -> bytes:
         visible = path.lstat()
         if (
             not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
             or is_link_or_reparse(visible)
             or (visible.st_dev, visible.st_ino) != (info.st_dev, info.st_ino)
         ):
@@ -594,11 +624,9 @@ def packaged_adapters() -> dict[str, str]:
             {"name", "description", "model", "model_reasoning_effort", "sandbox_mode", "developer_instructions"},
             f"packaged adapter {name}",
         )
-        expected_runtime = ROLE_RUNTIME[name]
-        actual_runtime = (document["model"], document["model_reasoning_effort"], document["sandbox_mode"])
         if (
             document["name"] != name
-            or actual_runtime != expected_runtime
+            or (document["model"], document["model_reasoning_effort"], document["sandbox_mode"]) != ROLE_RUNTIME[name]
             or not isinstance(document["description"], str)
             or not document["description"]
             or not isinstance(document["developer_instructions"], str)
@@ -639,7 +667,7 @@ def reject_multiline_toml_strings(original: str) -> None:
         index += 1
 
 
-def render_agents_config(original: str, *, remove_legacy_enabled: bool) -> str:
+def render_agents_config(original: str) -> str:
     try:
         parsed = tomllib.loads(original) if original else {}
     except tomllib.TOMLDecodeError as exc:
@@ -647,11 +675,8 @@ def render_agents_config(original: str, *, remove_legacy_enabled: bool) -> str:
     if not isinstance(parsed, dict) or ("agents" in parsed and not isinstance(parsed["agents"], dict)):
         raise InstallError("agents configuration must be a table")
     agents = parsed.get("agents", {})
-    has_enabled = "enabled" in agents
-    if has_enabled and not remove_legacy_enabled:
+    if "enabled" in agents:
         raise InstallError("unmanaged [agents].enabled is unsupported; refusing to delete it")
-    if remove_legacy_enabled and (not has_enabled or agents.get("enabled") is not True):
-        raise InstallError("legacy [agents].enabled provenance or value is ambiguous")
     reject_multiline_toml_strings(original)
     if re.search(r'''(?m)^\s*(?:agents|"agents"|'agents')\s*\.''', original):
         raise InstallError("unsupported dotted agents keys; refuse ambiguous merge")
@@ -663,7 +688,6 @@ def render_agents_config(original: str, *, remove_legacy_enabled: bool) -> str:
     out: list[str] = []
     in_agents = False
     found_agents = False
-    removed_legacy_enabled = 0
 
     def append_managed() -> None:
         if out and not out[-1].endswith(("\n", "\r")):
@@ -676,19 +700,18 @@ def render_agents_config(original: str, *, remove_legacy_enabled: bool) -> str:
         if table:
             if in_agents:
                 append_managed()
-            in_agents = table.group(1).strip() == "agents"
+            table_name = table.group(1).strip()
+            if len(table_name) >= 2 and table_name[0] == table_name[-1] and table_name[0] in {"'", '"'}:
+                table_name = table_name[1:-1]
+            in_agents = table_name == "agents"
             found_agents |= in_agents
             out.append(line)
             continue
         if in_agents and re.match(r"^\s*enabled\s*=", line):
-            if not remove_legacy_enabled:
-                raise InstallError("unmanaged [agents].enabled is unsupported; refusing to delete it")
-            removed_legacy_enabled += 1
+            raise InstallError("unmanaged [agents].enabled is unsupported; refusing to delete it")
             continue
-        if not (in_agents and re.match(r"^\s*(max_depth|max_threads)\s*=", line)):
+        if not (in_agents and MANAGED_KEY_LINE.match(line)):
             out.append(line)
-    if remove_legacy_enabled and removed_legacy_enabled != 1:
-        raise InstallError("legacy [agents].enabled table location is ambiguous")
     if in_agents:
         append_managed()
     elif not found_agents:
@@ -707,22 +730,82 @@ def render_agents_config(original: str, *, remove_legacy_enabled: bool) -> str:
     return rendered
 
 
+def render_agents_config_without_managed(original: str, managed: dict[str, Any]) -> str:
+    """Remove only this installer's proven keys while preserving TOML semantics."""
+    if not compatible_managed_agents(managed):
+        raise InstallError("managed config is incompatible with the current manifest format")
+    try:
+        parsed = tomllib.loads(original)
+    except tomllib.TOMLDecodeError as exc:
+        raise InstallError(f"invalid TOML before uninstall: {exc}") from exc
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("agents"), dict):
+        raise InstallError("managed agents configuration is missing")
+    agents = parsed["agents"]
+    if any(type(agents.get(key)) is not type(value) or agents.get(key) != value for key, value in managed.items()):
+        raise InstallError("managed config values mismatch")
+    reject_multiline_toml_strings(original)
+    if re.search(r'''(?m)^\s*(?:agents|"agents"|'agents')\s*\.''', original):
+        raise InstallError("unsupported dotted agents keys; refuse ambiguous uninstall")
+
+    lines = original.splitlines(keepends=True)
+    out: list[str] = []
+    in_agents = False
+    removed: set[str] = set()
+    for line in lines:
+        table = re.match(r"^\s*\[([^]]+)\]\s*(?:#.*)?$", line)
+        if table:
+            table_name = table.group(1).strip()
+            if len(table_name) >= 2 and table_name[0] == table_name[-1] and table_name[0] in {"'", '"'}:
+                table_name = table_name[1:-1]
+            in_agents = table_name == "agents"
+            out.append(line)
+            continue
+        match = MANAGED_KEY_LINE.match(line) if in_agents else None
+        if match:
+            removed.add(match.group("key").strip("'\""))
+        else:
+            out.append(line)
+    if removed != set(managed):
+        raise InstallError("cannot locate every managed config key for safe uninstall")
+
+    rendered = "".join(out)
+    try:
+        rendered_document = tomllib.loads(rendered)
+    except tomllib.TOMLDecodeError as exc:
+        raise InstallError(f"invalid staged TOML after uninstall: {exc}") from exc
+    expected_document = dict(parsed)
+    expected_agents = dict(agents)
+    for key in managed:
+        expected_agents.pop(key)
+    expected_document["agents"] = expected_agents
+    if rendered_document != expected_document:
+        raise InstallError("uninstall config rewrite would change unmanaged TOML semantics")
+    return rendered
+
+
 def build_install_plan(p: dict[str, Path]) -> tuple[dict[str, Any], list[tuple[Path, str]]]:
     validate_destinations(p, skip_skill_final=True)
-    manifest = load_managed_manifest(p)
-    remove_legacy_enabled = bool(
-        manifest is not None
-        and manifest["installer_version"] in LEGACY_INSTALL_VERSIONS
-    )
+    load_managed_manifest(p)
     try:
         original = p["config"].read_text(encoding="utf-8") if p["config"].exists() else ""
     except (OSError, UnicodeError) as exc:
         raise InstallError(f"cannot read Codex config: {exc}") from exc
     adapters = packaged_adapters()
     writes = [(p["agents"] / f"{name}.toml", adapters[name]) for name in ROLE_NAMES]
-    writes.append((p["config"], render_agents_config(original, remove_legacy_enabled=remove_legacy_enabled)))
-    migration = "remove_legacy_agents_enabled" if remove_legacy_enabled else "none"
-    return {"role_count": len(ROLE_NAMES), "config_migration": migration}, writes
+    writes.append((p["config"], render_agents_config(original)))
+    return {"role_count": len(ROLE_NAMES), "config_migration": "none"}, writes
+
+
+def build_uninstall_plan(p: dict[str, Path]) -> tuple[dict[str, Any], str]:
+    validate_destinations(p, skip_skill_final=True)
+    manifest = load_managed_manifest(p)
+    if manifest is None:
+        raise InstallError("NOT_MANAGED: no verified govern-agent-system installation is present")
+    try:
+        original = p["config"].read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise InstallError(f"cannot read Codex config: {exc}") from exc
+    return manifest, render_agents_config_without_managed(original, manifest["config"]["managed"])
 
 
 def inspect(p: dict[str, Path], writes: list[tuple[Path, str]]) -> dict[str, Any]:
@@ -746,11 +829,7 @@ def inspect(p: dict[str, Path], writes: list[tuple[Path, str]]) -> dict[str, Any
         "ok": not conflicts,
         "skill": str(p["skill"]),
         "managed": managed,
-        "config_migration": (
-            "remove_legacy_agents_enabled"
-            if manifest is not None and manifest["installer_version"] in LEGACY_INSTALL_VERSIONS
-            else "none"
-        ),
+        "config_migration": "none",
         "agent_conflicts": conflicts,
         "mcp_touched": False,
         "permission_enforcement": private_permission_enforcement(),
@@ -762,7 +841,54 @@ def acquire_lock(p: dict[str, Path]) -> managed_lock.LockHandle:
     try:
         return managed_lock.acquire(p["lock"], p["codex"])
     except managed_lock.LockError as exc:
-        raise InstallError(str(exc)) from exc
+        if "INSTALL_LOCKED" not in str(exc):
+            raise InstallError(str(exc)) from exc
+        locked_error = str(exc)
+    try:
+        managed_lock.reclaim_stale(p["lock"], p["codex"])
+        handle = managed_lock.acquire(p["lock"], p["codex"])
+    except managed_lock.LockError as exc:
+        raise InstallError(f"{locked_error}; stale-lock reclamation refused: {exc}") from exc
+    try:
+        if recovery_journal(p) is None:
+            cleanup_orphaned_staging(p)
+        return handle
+    except Exception:
+        release_lock(handle)
+        raise
+
+
+def acquire_recovery_lock(p: dict[str, Path]) -> managed_lock.LockHandle:
+    return acquire_lock(p)
+
+
+def cleanup_orphaned_staging(p: dict[str, Path]) -> None:
+    """Clean the reserved staging namespace only after a dead-owner lock was proven."""
+    parents = {
+        p["skill"].parent,
+        p["agents"],
+        p["config"].parent,
+        p["manifest"].parent,
+    }
+    for parent in parents:
+        info = lstat_or_none(parent)
+        if info is None:
+            continue
+        validate_chain(parent, managed_root(p, parent))
+        if is_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            raise InstallError(f"unsafe transaction staging parent: {parent}")
+        changed = False
+        for item in list(parent.iterdir()):
+            if not STAGING_NAME.fullmatch(item.name):
+                continue
+            item_info = item.lstat()
+            if os.name != "nt" and item_info.st_uid != os.geteuid():
+                raise InstallError(f"orphaned transaction artifact is not owned by the current user: {item}")
+            validate_chain(item, managed_root(p, item), skip_final=True)
+            remove_path(item)
+            changed = True
+        if changed:
+            fsync_directory(parent)
 
 
 def release_lock(lock: managed_lock.LockHandle) -> None:
@@ -784,8 +910,43 @@ def hold_lock_for_test() -> None:
 def copy_file_verified(source: Path, target: Path, expected_hash: str) -> None:
     shutil.copy2(source, target)
     restrict_path(target, 0o600, "file")
+    fsync_file(target)
     if file_hash(target) != expected_hash:
         raise InstallError(f"staged file hash mismatch: {source}")
+
+
+def fsync_file(path: Path) -> None:
+    info = lstat_or_none(path)
+    if info is None or is_link_or_reparse(info) or not stat.S_ISREG(info.st_mode):
+        raise InstallError(f"cannot make non-regular transaction file durable: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise InstallError(f"cannot open transaction file for durability: {path}: {exc}") from exc
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        raise InstallError(f"cannot make transaction file durable: {path}: {exc}") from exc
+    finally:
+        os.close(fd)
+
+
+def fsync_tree_bottom_up(root: Path) -> None:
+    info = lstat_or_none(root)
+    if info is None or is_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
+        raise InstallError(f"cannot make non-directory snapshot tree durable: {root}")
+    for child in sorted(root.iterdir(), key=lambda item: item.name):
+        child_info = lstat_or_none(child)
+        if child_info is None or is_link_or_reparse(child_info):
+            raise InstallError(f"unsafe snapshot tree entry during durability sync: {child}")
+        if stat.S_ISREG(child_info.st_mode):
+            fsync_file(child)
+        elif stat.S_ISDIR(child_info.st_mode):
+            fsync_tree_bottom_up(child)
+        else:
+            raise InstallError(f"unsupported snapshot tree entry during durability sync: {child}")
+    fsync_directory(root)
 
 
 def snapshot_entries(p: dict[str, Path]) -> list[tuple[str, Path]]:
@@ -838,7 +999,7 @@ def _collect_verified_snapshots(
         except (UnicodeError, json.JSONDecodeError) as exc:
             raise InstallError(f"invalid snapshot: {exc}") from exc
         document = exact_keys(document, {"schema_version", "identity", "installer_version", "purpose", "entries"}, "snapshot")
-        if document["schema_version"] != SNAPSHOT_SCHEMA or document["identity"] != IDENTITY or not isinstance(document["installer_version"], str) or not VERSION.fullmatch(document["installer_version"]) or document["purpose"] not in {"install", "rollback-recovery"} or document["entries"] != path_entries:
+        if not exact_integer(document["schema_version"], SNAPSHOT_SCHEMA) or document["identity"] != IDENTITY or not isinstance(document["installer_version"], str) or not VERSION.fullmatch(document["installer_version"]) or document["purpose"] not in SNAPSHOT_PURPOSES or document["entries"] != path_entries:
             raise InstallError("snapshot changed during provenance validation")
         expected_names = {"manifest.json"} | {entry["label"] for entry in path_entries if entry["kind"] in {"file", "directory"}}
         if set(os.listdir(snapshot_fd)) != expected_names:
@@ -955,6 +1116,7 @@ def create_snapshot(p: dict[str, Path], purpose: str) -> Path:
                 copied_hash = tree_hash(target / label)
                 if copied_hash != expected_hash:
                     raise InstallError(f"snapshot directory changed while copying: {path}")
+                fsync_tree_bottom_up(target / label)
                 record.update(kind="directory", sha256=copied_hash)
             else:
                 raise InstallError(f"unsupported snapshot source: {path}")
@@ -969,6 +1131,10 @@ def create_snapshot(p: dict[str, Path], purpose: str) -> Path:
         manifest = target / "manifest.json"
         manifest.write_text(json.dumps(document, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         restrict_path(manifest, 0o600, "file")
+        fsync_file(manifest)
+        fsync_directory(target)
+        fsync_directory(p["snapshots"])
+        fsync_directory(p["state"])
         return target
     except Exception:
         shutil.rmtree(target, ignore_errors=True)
@@ -989,7 +1155,7 @@ def read_snapshot(raw: str, p: dict[str, Path]) -> tuple[Path, list[dict[str, An
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise InstallError(f"invalid snapshot: {exc}") from exc
     document = exact_keys(document, {"schema_version", "identity", "installer_version", "purpose", "entries"}, "snapshot")
-    if document["schema_version"] != SNAPSHOT_SCHEMA or document["identity"] != IDENTITY or not isinstance(document["installer_version"], str) or not VERSION.fullmatch(document["installer_version"]) or document["purpose"] not in {"install", "rollback-recovery"}:
+    if not exact_integer(document["schema_version"], SNAPSHOT_SCHEMA) or document["identity"] != IDENTITY or not isinstance(document["installer_version"], str) or not VERSION.fullmatch(document["installer_version"]) or document["purpose"] not in SNAPSHOT_PURPOSES:
         raise InstallError("invalid snapshot identity or version")
     expected = dict(snapshot_entries(p))
     entries = document["entries"]
@@ -1134,6 +1300,130 @@ def write_journal(p: dict[str, Path], document: dict[str, Any]) -> None:
     raw = (json.dumps(document, sort_keys=True, indent=2) + "\n").encode("utf-8")
     temp = stage_file(p["state"], raw, p)
     os.replace(temp, p["journal"])
+    fsync_directory(p["state"])
+
+
+def fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise InstallError(f"cannot open transaction directory for durability: {path}: {exc}") from exc
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        raise InstallError(f"cannot make transaction directory durable: {path}: {exc}") from exc
+    finally:
+        os.close(fd)
+
+
+def transaction_cleanup_root(item: Path | None) -> Path | None:
+    if item is None:
+        return None
+    if item.name == "payload" and item.parent.name.startswith(".govern-agent-system."):
+        return item.parent
+    return item
+
+
+def transaction_steps(
+    staged: list[tuple[Path, Path | None]],
+    backup_paths: list[tuple[Path, Path]],
+) -> tuple[list[dict[str, str | None]], list[str]]:
+    steps: list[dict[str, str | None]] = []
+    artifacts: list[str] = []
+    for (destination, item), (_, backup) in zip(staged, backup_paths):
+        steps.append({
+            "destination": str(destination),
+            "backup": str(backup),
+            "staged": str(item) if item is not None else None,
+        })
+        artifacts.append(str(backup))
+        cleanup_root = transaction_cleanup_root(item)
+        if cleanup_root is not None:
+            artifacts.append(str(cleanup_root))
+    return steps, list(dict.fromkeys(artifacts))
+
+
+def valid_transaction_artifact(path: Path, p: dict[str, Path]) -> bool:
+    path = canonical(path)
+    for _, destination in snapshot_entries(p):
+        destination = canonical(destination)
+        if path.parent != destination.parent:
+            continue
+        backup_prefix = f".{destination.name}.backup-"
+        if path.name.startswith(backup_prefix) and TRANSACTION_TOKEN.fullmatch(path.name[len(backup_prefix):]):
+            return True
+        if STAGING_NAME.fullmatch(path.name):
+            return True
+    return False
+
+
+def validate_transaction_artifact(raw: Any, p: dict[str, Path]) -> Path:
+    if not isinstance(raw, str):
+        raise InstallError("RECOVERY_REQUIRED: invalid transaction artifact path")
+    path = canonical(Path(raw))
+    if not Path(raw).is_absolute() or str(path) != raw or not valid_transaction_artifact(path, p):
+        raise InstallError("RECOVERY_REQUIRED: invalid transaction artifact path")
+    validate_chain(path, managed_root(p, path), skip_final=True)
+    return path
+
+
+def validate_transaction_steps(document: dict[str, Any], p: dict[str, Path]) -> None:
+    steps = document.get("steps")
+    artifacts = document.get("artifacts")
+    if not isinstance(steps, list) or not isinstance(artifacts, list) or len(steps) != len(snapshot_entries(p)):
+        raise InstallError("RECOVERY_REQUIRED: invalid recovery transaction plan")
+    expected_destinations = {str(path) for _, path in snapshot_entries(p)}
+    seen: set[str] = set()
+    required_artifacts: set[str] = set()
+    for value in steps:
+        step = exact_keys(value, {"destination", "backup", "staged"}, "recovery transaction step")
+        destination_raw = step["destination"]
+        if not isinstance(destination_raw, str) or destination_raw not in expected_destinations or destination_raw in seen:
+            raise InstallError("RECOVERY_REQUIRED: invalid recovery transaction destination")
+        seen.add(destination_raw)
+        destination = Path(destination_raw)
+        backup = validate_transaction_artifact(step["backup"], p)
+        backup_prefix = f".{destination.name}.backup-"
+        if backup.parent != destination.parent or not backup.name.startswith(backup_prefix):
+            raise InstallError("RECOVERY_REQUIRED: invalid recovery transaction backup")
+        required_artifacts.add(str(backup))
+        staged_raw = step["staged"]
+        if staged_raw is not None:
+            if not isinstance(staged_raw, str):
+                raise InstallError("RECOVERY_REQUIRED: invalid recovery staged path")
+            staged = canonical(Path(staged_raw))
+            direct = staged.parent == destination.parent and STAGING_NAME.fullmatch(staged.name)
+            payload = staged.name == "payload" and staged.parent.parent == destination.parent and STAGING_NAME.fullmatch(staged.parent.name)
+            if not Path(staged_raw).is_absolute() or str(staged) != staged_raw or not (direct or payload):
+                raise InstallError("RECOVERY_REQUIRED: invalid recovery staged path")
+            cleanup_root = transaction_cleanup_root(staged)
+            if cleanup_root is not None:
+                required_artifacts.add(str(cleanup_root))
+    if seen != expected_destinations or document["destinations"] != [step["destination"] for step in steps]:
+        raise InstallError("RECOVERY_REQUIRED: incomplete recovery transaction plan")
+    checked_artifacts = [str(validate_transaction_artifact(raw, p)) for raw in artifacts]
+    if len(set(checked_artifacts)) != len(checked_artifacts) or not required_artifacts.issubset(checked_artifacts):
+        raise InstallError("RECOVERY_REQUIRED: invalid recovery transaction artifacts")
+
+
+def cleanup_transaction_artifacts(document: dict[str, Any], p: dict[str, Path]) -> list[str]:
+    errors: list[str] = []
+    for raw in reversed(document.get("artifacts", [])):
+        try:
+            path = validate_transaction_artifact(raw, p)
+            remove_path(path)
+            fsync_directory(path.parent)
+        except Exception as exc:
+            errors.append(str(exc))
+    return errors
+
+
+def close_journal(p: dict[str, Path]) -> None:
+    p["journal"].unlink(missing_ok=True)
+    fsync_directory(p["state"])
 
 
 def recovery_journal(p: dict[str, Path]) -> dict[str, Any] | None:
@@ -1148,22 +1438,55 @@ def recovery_journal(p: dict[str, Path]) -> dict[str, Any] | None:
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise InstallError(f"RECOVERY_REQUIRED: invalid recovery journal: {exc}") from exc
     required = {"schema_version", "identity", "operation", "status", "recovery_snapshot", "destinations", "error"}
-    if not isinstance(document, dict) or not required.issubset(document) or document.get("schema_version") != 1 or document.get("identity") != IDENTITY:
+    allowed = required | {"steps", "artifacts"}
+    if not isinstance(document, dict) or not required.issubset(document) or not set(document).issubset(allowed) or not exact_integer(document.get("schema_version"), 1) or document.get("identity") != IDENTITY:
         raise InstallError("RECOVERY_REQUIRED: invalid recovery journal schema")
+    if document.get("operation") not in JOURNAL_OPERATIONS or document.get("status") not in JOURNAL_STATUSES:
+        raise InstallError("RECOVERY_REQUIRED: invalid recovery journal state")
+    if document["error"] is not None and not isinstance(document["error"], str):
+        raise InstallError("RECOVERY_REQUIRED: invalid recovery journal error")
+    snapshot_raw = document.get("recovery_snapshot")
+    if not isinstance(snapshot_raw, str):
+        raise InstallError("RECOVERY_REQUIRED: invalid recovery snapshot path")
+    snapshot = canonical(Path(snapshot_raw))
+    if not Path(snapshot_raw).is_absolute() or str(snapshot) != snapshot_raw or not lexically_contained(snapshot, p["snapshots"]) or not SNAPSHOT_NAME.fullmatch(snapshot.name):
+        raise InstallError("RECOVERY_REQUIRED: invalid recovery snapshot path")
+    destinations = document.get("destinations")
+    expected_destinations = {str(path) for _, path in snapshot_entries(p)}
+    if not isinstance(destinations, list) or any(not isinstance(value, str) or value not in expected_destinations for value in destinations) or len(set(destinations)) != len(destinations):
+        raise InstallError("RECOVERY_REQUIRED: invalid recovery destinations")
+    has_plan = "steps" in document or "artifacts" in document
+    if has_plan:
+        validate_transaction_steps(document, p)
+    elif document["status"] in {"promoting", "recovering"}:
+        raise InstallError("RECOVERY_REQUIRED: interrupted transaction lacks a recovery plan")
     return document
 
 
 def ensure_mutation_allowed(p: dict[str, Path], *, recover: bool = False, snapshot: str | None = None) -> None:
     document = recovery_journal(p)
-    fenced = document is not None and document.get("status") == "recovery_failed"
+    fenced = document is not None and document.get("status") != "recovered"
     if not fenced:
         if recover:
-            raise InstallError("NO_RECOVERY_REQUIRED: no recovery_failed journal is present")
+            raise InstallError("NO_RECOVERY_REQUIRED: no nonterminal recovery journal is present")
         return
     expected = canonical(Path(document["recovery_snapshot"])) if isinstance(document.get("recovery_snapshot"), str) else None
     supplied = canonical(Path(snapshot)) if snapshot is not None else None
     if not recover or expected is None or supplied != expected:
         raise InstallError(f"RECOVERY_REQUIRED: run rollback --recover --snapshot {document.get('recovery_snapshot')}")
+
+
+def interrupt_for_test(
+    variable: str | None,
+    termination_variable: str | None,
+    index: int,
+    phase: str,
+    operation: str,
+) -> None:
+    if termination_variable and os.environ.get(termination_variable) == f"{index}:{phase}":
+        os._exit(86)
+    if variable and os.environ.get(variable) == f"{index}:{phase}":
+        raise KeyboardInterrupt(f"injected {operation} interruption after {index}:{phase}")
 
 
 def promote(
@@ -1173,6 +1496,8 @@ def promote(
     operation: str,
     recovery_snapshot: Path,
     failure_variable: str | None,
+    interrupt_variable: str | None,
+    termination_variable: str | None,
     fenced_anchor: Path | None = None,
 ) -> tuple[bool, bool, str | None]:
     token = uuid.uuid4().hex
@@ -1182,27 +1507,51 @@ def promote(
         validate_chain(backup, managed_root(p, backup))
         if lstat_or_none(backup) is not None:
             raise InstallError(f"rollback backup collision: {backup}")
-    journal = recovery_journal(p) if fenced_anchor is not None else {
-        "schema_version": 1,
-        "identity": IDENTITY,
-        "operation": operation,
-        "status": "promoting",
-        "recovery_snapshot": str(recovery_snapshot),
-        "destinations": [str(destination) for destination, _ in staged],
-    }
-    if fenced_anchor is None:
-        write_journal(p, journal)
+    steps, artifacts = transaction_steps(staged, backup_paths)
+    if fenced_anchor is not None:
+        previous = recovery_journal(p)
+        if previous is None:
+            raise InstallError("RECOVERY_REQUIRED: recovery journal disappeared")
+        journal = {
+            **previous,
+            "status": "recovering",
+            "destinations": [str(destination) for destination, _ in staged],
+            "error": None,
+            "steps": steps,
+            "artifacts": list(dict.fromkeys([*previous.get("artifacts", []), *artifacts])),
+        }
+    else:
+        journal = {
+            "schema_version": 1,
+            "identity": IDENTITY,
+            "operation": operation,
+            "status": "promoting",
+            "recovery_snapshot": str(recovery_snapshot),
+            "destinations": [str(destination) for destination, _ in staged],
+            "error": None,
+            "steps": steps,
+            "artifacts": artifacts,
+        }
+    validate_transaction_steps(journal, p)
+    if os.environ.get(f"CAG_TERMINATE_{operation.upper()}_BEFORE_JOURNAL") == "1":
+        os._exit(87)
+    write_journal(p, journal)
     try:
         for index, ((destination, item), (_, candidate_backup)) in enumerate(zip(staged, backup_paths), 1):
             validate_chain(destination, managed_root(p, destination), skip_final=destination == p["skill"])
             if lstat_or_none(destination) is not None:
                 os.replace(destination, candidate_backup)
                 backup: Path | None = candidate_backup
+                backups.append((destination, backup))
+                fsync_directory(destination.parent)
+                interrupt_for_test(interrupt_variable, termination_variable, index, "backup", operation)
             else:
                 backup = None
-            backups.append((destination, backup))
+                backups.append((destination, backup))
             if item is not None:
                 os.replace(item, destination)
+                fsync_directory(destination.parent)
+                interrupt_for_test(interrupt_variable, termination_variable, index, "destination", operation)
             if failure_variable and os.environ.get(failure_variable) == str(index):
                 raise RuntimeError(f"injected {operation} promotion failure after {index}")
         if fenced_anchor is not None:
@@ -1228,30 +1577,36 @@ def promote(
             recovered = False
         if fenced_anchor is not None:
             recovered = False
-        else:
+        cleanup_errors: list[str] = []
+        if recovered:
+            cleanup_errors = cleanup_transaction_artifacts(journal, p)
+            recovered = not cleanup_errors
+        if recovered:
+            try:
+                close_journal(p)
+            except Exception as close_exc:
+                cleanup_errors.append(str(close_exc))
+                recovered = False
+        if not recovered:
             journal["status"] = "recovered" if recovered else "recovery_failed"
-            journal["error"] = str(exc)
+            detail = [str(exc), *cleanup_errors]
+            journal["error"] = "; ".join(value for value in detail if value)
             try:
                 write_journal(p, journal)
             except Exception:
                 recovered = False
         return False, recovered, str(exc)
     else:
-        cleanup_errors: list[str] = []
-        for _, backup in backups:
-            if backup is not None:
-                try:
-                    remove_path(backup)
-                except Exception as exc:
-                    cleanup_errors.append(str(exc))
+        cleanup_errors = cleanup_transaction_artifacts(journal, p)
         if cleanup_errors:
             message = "promotion committed but backup cleanup failed: " + "; ".join(cleanup_errors)
-            if fenced_anchor is None:
-                journal["status"] = "recovery_failed"
-                journal["error"] = message
-                write_journal(p, journal)
+            journal["status"] = "recovery_failed"
+            journal["error"] = message
+            write_journal(p, journal)
             return True, False, message
-        p["journal"].unlink(missing_ok=True)
+        close_journal(p)
+        if os.environ.get(f"CAG_TERMINATE_{operation.upper()}_AFTER_JOURNAL_CLOSE") == "1":
+            os._exit(88)
         return True, False, None
     finally:
         cleanup_staged(staged)
@@ -1314,6 +1669,20 @@ def build_install_staging(p: dict[str, Path], writes: list[tuple[Path, str]]) ->
         raise
 
 
+def build_uninstall_staging(p: dict[str, Path], rendered_config: str) -> list[tuple[Path, Path | None]]:
+    staged: list[tuple[Path, Path | None]] = [
+        (p["skill"], None),
+        *((p["agents"] / f"{name}.toml", None) for name in ROLE_NAMES),
+    ]
+    try:
+        staged.append((p["config"], stage_file(p["config"].parent, rendered_config.encode("utf-8"), p)))
+        staged.append((p["manifest"], None))
+        return staged
+    except Exception:
+        cleanup_staged(staged)
+        raise
+
+
 def install() -> dict[str, Any]:
     p = paths()
     ensure_mutation_allowed(p)
@@ -1342,10 +1711,54 @@ def install() -> dict[str, Any]:
             operation="install",
             recovery_snapshot=saved,
             failure_variable="CAG_FAIL_AFTER_SKILL",
+            interrupt_variable="CAG_INTERRUPT_INSTALL_AFTER",
+            termination_variable="CAG_TERMINATE_INSTALL_AFTER",
         )
         if error is not None:
             return {"ok": False, "error": error, "snapshot": str(saved), "committed": committed, "recovery": recovered, "journal": str(p["journal"]), "mcp_touched": False}
         return {"ok": True, "installed": str(p["skill"]), "snapshot": str(saved), "link": False, "mcp_touched": False}
+    finally:
+        release_lock(lock)
+
+
+def uninstall() -> dict[str, Any]:
+    p = paths()
+    ensure_mutation_allowed(p)
+    preliminary = build_uninstall_plan(p)
+    lock = acquire_lock(p)
+    try:
+        hold_lock_for_test()
+        ensure_mutation_allowed(p)
+        plan = build_uninstall_plan(p)
+        if plan != preliminary:
+            raise InstallError("managed state changed while acquiring uninstall lock")
+        harden_existing_managed_permissions(p, lock)
+        staged = build_uninstall_staging(p, plan[1])
+        try:
+            saved = create_snapshot(p, "uninstall")
+        except Exception:
+            cleanup_staged(staged)
+            raise
+        committed, recovered, error = promote(
+            staged,
+            p=p,
+            operation="uninstall",
+            recovery_snapshot=saved,
+            failure_variable="CAG_FAIL_UNINSTALL_AFTER",
+            interrupt_variable="CAG_INTERRUPT_UNINSTALL_AFTER",
+            termination_variable="CAG_TERMINATE_UNINSTALL_AFTER",
+        )
+        if error is not None:
+            return {
+                "ok": False,
+                "error": error,
+                "snapshot": str(saved),
+                "committed": committed,
+                "recovery": recovered,
+                "journal": str(p["journal"]),
+                "mcp_touched": False,
+            }
+        return {"ok": True, "uninstalled": str(p["skill"]), "snapshot": str(saved), "mcp_touched": False}
     finally:
         release_lock(lock)
 
@@ -1365,6 +1778,8 @@ def rollback_locked(raw: str, p: dict[str, Path], recover: bool) -> dict[str, An
         operation="rollback",
         recovery_snapshot=recovery,
         failure_variable="CAG_FAIL_ROLLBACK_AFTER",
+        interrupt_variable="CAG_INTERRUPT_ROLLBACK_AFTER",
+        termination_variable="CAG_TERMINATE_ROLLBACK_AFTER",
         fenced_anchor=source if recover else None,
     )
     if error is not None:
@@ -1386,7 +1801,7 @@ def rollback(raw: str, recover: bool) -> dict[str, Any]:
     p = paths()
     ensure_mutation_allowed(p, recover=recover, snapshot=raw)
     validate_destinations(p, skip_skill_final=True)
-    lock = acquire_lock(p)
+    lock = acquire_recovery_lock(p) if recover else acquire_lock(p)
     try:
         hold_lock_for_test()
         ensure_mutation_allowed(p, recover=recover, snapshot=raw)
@@ -1415,12 +1830,20 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check")
     sub.add_parser("install")
+    sub.add_parser("uninstall")
     item = sub.add_parser("rollback")
     item.add_argument("--snapshot", required=True)
     item.add_argument("--recover", action="store_true")
     args = parser.parse_args()
     try:
-        result = check() if args.command == "check" else install() if args.command == "install" else rollback(args.snapshot, args.recover)
+        if args.command == "check":
+            result = check()
+        elif args.command == "install":
+            result = install()
+        elif args.command == "uninstall":
+            result = uninstall()
+        else:
+            result = rollback(args.snapshot, args.recover)
     except InstallError as exc:
         fail(str(exc))
     print(json.dumps(result, sort_keys=True))

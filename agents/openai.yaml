@@ -1,4 +1,4 @@
 interface:
   display_name: "Govern Agent System"
-  short_description: "Automatic bounded delegation through eight fixed roles"
-  default_prompt: "Load $govern-agent-system before spawning or reusing custom agents, then choose and brief the smallest useful agent only when delegation materially helps."
+  short_description: "Fixed-profile native agent delegation"
+  default_prompt: "Use $govern-agent-system to freeze the objective and acceptance checks, delegate one bounded node only when it materially helps, and escalate only after repeated reasoning failure."

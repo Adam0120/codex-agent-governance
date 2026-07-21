@@ -131,6 +131,108 @@ def verify(handle: LockHandle) -> None:
         os.close(current_fd)
 
 
+def _lock_pid(fd: int) -> int:
+    os.lseek(fd, 0, os.SEEK_SET)
+    raw = os.read(fd, 65)
+    if len(raw) > 64:
+        raise LockError("unsafe managed lock owner record")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeError as exc:
+        raise LockError("unsafe managed lock owner record") from exc
+    if not text.endswith("\n") or not text[:-1].isdigit():
+        raise LockError("unsafe managed lock owner record")
+    pid = int(text[:-1])
+    if pid <= 0:
+        raise LockError("unsafe managed lock owner record")
+    return pid
+
+
+def _process_is_alive(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        process_query_limited_information = 0x1000
+        still_active = 259
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER means no such PID.
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return True
+
+
+def reclaim_stale(path: Path, root: Path) -> bool:
+    """Remove a proven dead-owner lock; live or ambiguous ownership remains fenced."""
+    path, root = _canonical(path), _canonical(root)
+    _validate_chain(path, root)
+    if _lstat(path) is None:
+        return False
+    if os.name != "nt":
+        parent_fd, _ = open_directory(path.parent)
+        lock_fd: int | None = None
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            lock_fd = os.open(path.name, flags, dir_fd=parent_fd)
+            held = os.fstat(lock_fd)
+            if not stat.S_ISREG(held.st_mode) or held.st_nlink != 1 or held.st_uid != os.geteuid():
+                raise LockError("unsafe managed lock file")
+            pid = _lock_pid(lock_fd)
+            if _process_is_alive(pid):
+                raise LockError("INSTALL_LOCKED: managed writer recorded by recovery lock is still alive")
+            visible = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            if (visible.st_dev, visible.st_ino) != (held.st_dev, held.st_ino):
+                raise LockError("managed lock changed during stale-lock recovery")
+            os.unlink(path.name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise LockError(f"cannot reclaim stale managed lock: {exc}") from exc
+        finally:
+            if lock_fd is not None:
+                os.close(lock_fd)
+            os.close(parent_fd)
+    info = _lstat(path)
+    if info is None:
+        return False
+    if _is_link_or_reparse(info) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise LockError("unsafe managed lock file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise LockError(f"cannot inspect stale managed lock: {exc}") from exc
+    try:
+        held = os.fstat(fd)
+        pid = _lock_pid(fd)
+        if _process_is_alive(pid):
+            raise LockError("INSTALL_LOCKED: managed writer recorded by recovery lock is still alive")
+        visible = path.lstat()
+        if (visible.st_dev, visible.st_ino) != (held.st_dev, held.st_ino):
+            raise LockError("managed lock changed during stale-lock recovery")
+        path.unlink()
+        return True
+    finally:
+        os.close(fd)
+
+
 def acquire(path: Path, root: Path) -> LockHandle:
     path, root = _canonical(path), _canonical(root)
     try:

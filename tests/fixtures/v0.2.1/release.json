@@ -1,0 +1,28 @@
+{
+  "adapters": {
+    "code_locator": "ba287fc547ef039f88cc2b229b58d3a08aa2b1610e8e4038008efbc6ce97b652",
+    "cross_module_architect": "95ef288f63cdbb23651046dff27f28f5d8cc3f46cd7cb1ff716f87a1c3cf0aad",
+    "default": "5425183c3d7a40d42e98e86ba8cff9468eb68635de588fd39289ca07024b2719",
+    "explorer": "6c038a1b278974a81d7e4eb416965981b1f66ac3c8b91348d48a2065fd239e1d",
+    "release_operator": "ceeda9f0f78fb878460964a7faaa30a4728520c47bd7e0eb70233ec77b9ebffe",
+    "semantic_reviewer": "698b30350d5fff9e6712990b45b73338cd2924949703d5263da2db7eda836ba9",
+    "systems_safety": "8a32982d0493aca5f4f30bd011b63a9a0b2224a40233532c343d6b8b879b3c58",
+    "worker": "76fc270752db4dd71b7a4f37848cac90c445e7ee067d3dcfe75058d6596d7767"
+  },
+  "config": {
+    "managed": {
+      "max_depth": 1,
+      "max_threads": 4
+    },
+    "managed_sha256": "b5752388f1d6040aa7411addd33d93721c28693f82d7b07708c81e2352e1ee50"
+  },
+  "identity": "govern-agent-system",
+  "installer_version": "0.2.1",
+  "schema_version": 1,
+  "skill": {
+    "file_sha256": "7df45a473a4acbe81f4d828c2312ac556e00307677b705232f62d0ec5e94dc91",
+    "tree_sha256": "993335a14ee37ba62c6df69a74955d208e8253cd327df4a48e31bba5de9a6393"
+  },
+  "snapshot_name": "snapshot-00000000000000000000000000000201",
+  "source_revision": "c9ea1cd979367ae218580fd52566716753cd5800"
+}
