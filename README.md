@@ -59,6 +59,8 @@ Standalone custom-agent TOMLs under `~/.codex/agents/` are discovered natively; 
 
 Other Codex configuration, including unrelated supported `[agents]` keys and MCP configuration, is preserved. Invoke `$govern-agent-system`; the main agent decides whether delegation materially helps, keeps one child by default, selects the smallest role for a frozen node, sends a minimal assignment, and reuses the same child agent id on follow-up to the same surface. The main agent owns architecture and product decisions, risk acceptance, integration, and final acceptance. A refusal or failed safety gate is `STOP`, not permission to widen scope or elevate authority.
 
+Codex should load this Skill before spawning or reusing a native custom agent, even when the user does not name it. The automatic trigger covers two or more independent work surfaces, multi-repository or cross-module work, parallel coordination, and accumulated review or release work. Loading is not permission to delegate: the main agent still applies the dispatchability gate and works directly when no bounded specialist materially helps.
+
 ## Dispatch discipline
 
 Describe each delegated node precisely enough to be independently verifiable. A dispatchable task has one observable state transition or one evidence question, one owner repository/worktree and baseline revision, a bounded file/symbol allowlist (or narrow search area), explicit exclusions, a frozen invariant, one operation class, and focused acceptance evidence. Background project context is not scope.

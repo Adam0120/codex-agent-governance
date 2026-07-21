@@ -238,6 +238,9 @@ class V02RuntimeTests(unittest.TestCase):
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8").lower()
         required = (
             "one observable state transition or one evidence question",
+            "load this skill before spawning or reusing any native custom agent",
+            "two or more independent work surfaces",
+            "loading the skill does not authorize delegation by itself",
             "repository/worktree plus baseline revision",
             "exact files or symbols",
             "allowed operation and exclusions",

@@ -1,11 +1,17 @@
 ---
 name: govern-agent-system
-description: Use native Codex custom agents for bounded node delegation through eight fixed roles while the capable main agent retains decisions and final acceptance.
+description: Automatically govern native Codex custom-agent delegation. Load before spawning or reusing agents, and for multi-surface, multi-repository, cross-module, parallel, review, or release work; delegation remains optional and bounded.
 ---
 
 # Govern Agent System
 
 Use this Skill from a capable Sol or Terra main agent at high-or-greater reasoning. Delegation is optional: use it only when an independent bounded specialist would materially improve speed, evidence, or safety.
+
+## Automatic loading
+
+Load this Skill before spawning or reusing any native custom agent. It should also be selected automatically when a request has two or more independent work surfaces, spans repositories or modules, needs a cross-module contract, asks for parallel agent work, or coordinates an accumulated review or release. Do not wait for the user to name this Skill or remind the main agent.
+
+Loading the Skill does not authorize delegation by itself. Apply the dispatchability gate and work directly when no bounded specialist provides material benefit.
 
 ## Roles
 

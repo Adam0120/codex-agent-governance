@@ -331,7 +331,7 @@ class GovernanceTests(unittest.TestCase):
             installed_runtime = tomllib.loads(installed_agent.read_text())
             self.assertTrue(updated["ok"])
             self.assertEqual(manifest["installer_version"], "0.2.1")
-            self.assertIn("Use one child by default.", (target / "SKILL.md").read_text())
+            self.assertIn("Use one child by default.", (target / "SKILL.md").read_text(encoding="utf-8"))
             self.assertEqual(
                 (installed_runtime["model"], installed_runtime["model_reasoning_effort"]),
                 ("gpt-5.6-terra", "medium"),
@@ -494,8 +494,10 @@ class GovernanceTests(unittest.TestCase):
                 rendered.append(config.read_bytes())
                 self.assertEqual(tomllib.loads(config.read_text())["agents"], {"future_key":"keep", "interrupt_message":False, "max_depth":1, "max_threads":4})
         self.assertEqual(len(set(rendered)), 1)
-        frontmatter = (ROOT / "SKILL.md").read_text().split("---", 2)[1]
+        frontmatter = (ROOT / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[1]
         self.assertIn("\nname: govern-agent-system\n", "\n" + frontmatter)
+        self.assertIn("Automatically govern native Codex custom-agent delegation", frontmatter)
+        self.assertIn("Load before spawning or reusing agents", frontmatter)
         self.assertIn("$govern-agent-system", (ROOT / "agents/openai.yaml").read_text())
         with tempfile.TemporaryDirectory() as temp:
             home, codex, env = isolated(temp); result = json.loads(run(INSTALL, "install", env=env).stdout)
@@ -511,6 +513,12 @@ class GovernanceTests(unittest.TestCase):
             installed = canonical_root(home) / ".agents/skills/govern-agent-system"
             self.assertEqual(Path(result["installed"]), installed)
             self.assertEqual([path.name for path in installed.iterdir()], ["SKILL.md"])
+
+    def test_skill_reads_explicitly_use_utf8_for_windows(self):
+        source = Path(__file__).read_text(encoding="utf-8")
+        self.assertIn('(target / "SKILL.md").read_text(encoding="utf-8")', source)
+        self.assertIn('(ROOT / "SKILL.md").read_text(encoding="utf-8")', source)
+        self.assertIn("→", (ROOT / "SKILL.md").read_text(encoding="utf-8"))
     def test_release_version_diagnostics_are_consistent(self):
         expected = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
         self.assertEqual(run(INSTALL, "--version").stdout.strip(), expected)
