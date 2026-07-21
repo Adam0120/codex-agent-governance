@@ -1,5 +1,7 @@
 # Govern Agent System
 
+[English](README.md)
+
 实验性 v0.2.1 提供一个精简 Codex Skill 与八个自包含自定义代理，通过 Codex 原生能力进行委派。日常运行不再需要 Python 治理控制器、请求 JSON、生成 profile、复用令牌、ledger 写入、项目 overlay 或强制 MCP 步骤。
 
 ## 为什么 v0.2 更简单

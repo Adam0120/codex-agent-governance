@@ -1,5 +1,7 @@
 # Govern Agent System
 
+[简体中文](README.zh-CN.md)
+
 Experimental v0.2.1 packages a concise Codex Skill and eight self-contained custom agents for native delegation. Ordinary runtime use has no Python governance controller, request JSON, generated profile, reuse token, ledger write, project overlay, or mandatory MCP step.
 
 ## Why v0.2 is simpler
