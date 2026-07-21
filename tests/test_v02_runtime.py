@@ -204,6 +204,10 @@ class V02RuntimeTests(unittest.TestCase):
             self.assertIn("mcp", instructions)
             for banned in BANNED_RUNTIME_TEXT:
                 self.assertNotIn(banned, instructions)
+            if name == "code_locator":
+                self.assertIn("lookup status is this role's terminal status", instructions)
+            else:
+                self.assertIn("terminal status (complete, partial, or stop)", instructions)
         narrowed_contracts = {
             "cross_module_architect": ("candidate options", "do not select product behavior"),
             "systems_safety": ("exact parent-approved", "accept risk"),
@@ -229,6 +233,28 @@ class V02RuntimeTests(unittest.TestCase):
             tomllib.loads((ROOT / ".codex/config.toml").read_text(encoding="utf-8"))["agents"],
             {"max_threads": 4, "max_depth": 1},
         )
+
+    def test_skill_requires_a_precise_single_node_dispatch_envelope(self):
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8").lower()
+        required = (
+            "one observable state transition or one evidence question",
+            "repository/worktree plus baseline revision",
+            "exact files or symbols",
+            "allowed operation and exclusions",
+            "complete",
+            "partial",
+            "one active writer per worktree/file set",
+            "same precise node repeatedly fails for reasoning quality",
+        )
+        for literal in required:
+            self.assertIn(literal, skill)
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8").lower()
+        readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+        self.assertIn("## dispatch discipline", readme)
+        self.assertIn("one observable state transition or one evidence question", readme)
+        self.assertIn("## 派发纪律", readme_zh)
+        self.assertIn("一个可观察状态转换或一个证据问题", readme_zh)
 
     def test_fresh_install_payload_config_and_read_only_check(self):
         with tempfile.TemporaryDirectory() as temp:

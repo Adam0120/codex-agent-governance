@@ -59,6 +59,14 @@ Standalone custom-agent TOMLs under `~/.codex/agents/` are discovered natively; 
 
 Other Codex configuration, including unrelated supported `[agents]` keys and MCP configuration, is preserved. Invoke `$govern-agent-system`; the main agent decides whether delegation materially helps, keeps one child by default, selects the smallest role for a frozen node, sends a minimal assignment, and reuses the same child agent id on follow-up to the same surface. The main agent owns architecture and product decisions, risk acceptance, integration, and final acceptance. A refusal or failed safety gate is `STOP`, not permission to widen scope or elevate authority.
 
+## Dispatch discipline
+
+Describe each delegated node precisely enough to be independently verifiable. A dispatchable task has one observable state transition or one evidence question, one owner repository/worktree and baseline revision, a bounded file/symbol allowlist (or narrow search area), explicit exclusions, a frozen invariant, one operation class, and focused acceptance evidence. Background project context is not scope.
+
+Split work before delegation when it mixes discovery, architecture, implementation, review, or release; crosses independent state machines; or bundles a migration, protocol version, runtime change, and client integration. Prefer `map → freeze → implement one node → verify/review`. One active writer owns a worktree/file set; readers use an immutable revision or finish before the writer changes their evidence base.
+
+Every non-locator child report ends with `COMPLETE`, `PARTIAL`, or `STOP`, the inspected/changed scope, resulting revision/state when relevant, verification performed or not performed, blocker, and next parent action. `code_locator` instead ends with its exact `Lookup` status. Reuse a child only while repository/worktree, baseline, objective/invariant, operation class, and owned surface remain unchanged. Shrink a weak task and add an acceptance signal before raising model capability; increase only one supported level for a repeatedly failing precise node, and reserve the highest-cost reviewer for a frozen high-risk diff.
+
 ## Safe update and rollback
 
 ### Upgrade an existing managed installation
