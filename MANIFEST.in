@@ -1,5 +1,0 @@
-include SKILL.md
-include scripts/install.py
-include scripts/managed_lock.py
-recursive-include .codex/agents *.toml
-recursive-include src *.py
