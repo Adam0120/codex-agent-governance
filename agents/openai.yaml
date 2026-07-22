@@ -1,4 +1,0 @@
-interface:
-  display_name: "Govern Agent System"
-  short_description: "Fixed-profile native agent delegation"
-  default_prompt: "Use $govern-agent-system to freeze the objective and acceptance checks, delegate one bounded node only when it materially helps, and escalate only after repeated reasoning failure."
