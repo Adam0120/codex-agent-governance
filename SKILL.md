@@ -1,17 +1,17 @@
 ---
 name: govern-agent-system
-description: Automatically govern native Codex custom-agent delegation with coordinator-first, cost-aware role selection. Load before spawning or reusing agents, and for multi-surface, multi-repository, cross-module, parallel, review, or release work; delegation remains bounded.
+description: Manually govern native Codex custom-agent delegation with coordinator-first, cost-aware role selection. Use only when the user explicitly invokes `$govern-agent-system` or asks to use this Skill.
 ---
 
 # Govern Agent System
 
-Use this Skill from any capable main model at high-or-greater reasoning, or whenever the user explicitly requests it. Do not gate loading on a model family or model name. Coordinator-first dispatch is the default: bounded implementation, search-heavy, repetitive, long-running, or independently verifiable work goes to the smallest lower-cost registered child; the main agent works directly only for trivial or tightly coupled work smaller than handoff, or when delegation is unavailable. When two or more ready nodes are genuinely independent, launch the smallest useful parallel batch without waiting for the user to request multiple agents.
+Use this Skill only when the user explicitly invokes `$govern-agent-system` or explicitly asks to use this Skill. Do not auto-select it based on task size, complexity, model reasoning level, repository/module count, review or release scope, or the availability of native custom-agent tools. Coordinator-first dispatch is the default once the Skill is manually invoked: bounded implementation, search-heavy, repetitive, long-running, or independently verifiable work goes to the smallest lower-cost registered child; the main agent works directly only for trivial or tightly coupled work smaller than handoff, or when delegation is unavailable. When two or more ready nodes are genuinely independent, launch the smallest useful parallel batch without waiting for the user to request multiple agents.
 
-## Automatic loading
+## Manual invocation
 
-Load this Skill before spawning or reusing any native custom agent. It should also be selected automatically when a request has two or more independent work surfaces, spans repositories or modules, needs a cross-module contract, asks for parallel agent work, or coordinates an accumulated review or release. Do not wait for the user to name this Skill or remind the main agent.
+Do not load this Skill merely because a request has two or more independent work surfaces, spans repositories or modules, needs a cross-module contract, asks for parallel agent work, or coordinates an accumulated review or release. Those conditions may inform how to work only after the user has manually invoked this Skill.
 
-Loading the Skill does not authorize delegation by itself. Apply the dispatchability gate and work directly when no bounded specialist provides material benefit.
+Manual invocation does not authorize delegation by itself. Apply the dispatchability gate and work directly when no bounded specialist provides material benefit.
 
 ## Coordinator-first ownership
 

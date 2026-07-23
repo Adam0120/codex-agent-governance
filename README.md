@@ -35,7 +35,7 @@ Restart Codex before starting a new task so its custom-agent registry reloads. T
 
 ## Dispatch policy
 
-Use `$govern-agent-system` when delegation helps. The main agent owns scope, contracts, integration, risk decisions, and final acceptance. Delegate one bounded, independently verifiable node to the smallest suitable role.
+This Skill is enabled only when you explicitly invoke `$govern-agent-system` or ask to use it; task complexity, cross-module work, parallelism, review, and release work do not trigger it automatically. Once enabled, the main agent owns scope, contracts, integration, risk decisions, and final acceptance. Delegate one bounded, independently verifiable node to the smallest suitable role.
 
 For a linear stage, reuse one child. When two or more genuinely independent nodes are ready, start the smallest useful parallel batch without waiting for a user request. Writers must have non-overlapping files or worktrees; dependent or conflicting work stays serial. While children run, the main agent continues safe coordination and integration work, waiting only for an actual dependency.
 
